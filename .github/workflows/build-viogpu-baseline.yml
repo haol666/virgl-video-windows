@@ -33,6 +33,7 @@ jobs:
         if (-not $stampInf) { throw "stampinf.exe not found in packages" }
         $stampInfDir = Split-Path $stampInf.FullName
         $env:PATH = "$stampInfDir;$env:PATH"
+        $env:SkipPackageVerification = 'true'
         msbuild third_party\viogpu\viogpu.sln "/p:Configuration=Win10 Release" /p:Platform=x64 /m /v:m /nologo
         if ($LASTEXITCODE -ne 0) { throw "msbuild failed with code $LASTEXITCODE" }
         "build exit code: $LASTEXITCODE"

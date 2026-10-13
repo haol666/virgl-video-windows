@@ -29,7 +29,7 @@ jobs:
     - name: Build viogpu (Release x64, Win10, all projects)
       shell: pwsh
       run: |
-        $stampInf = Get-ChildItem packages -Recurse -Filter "stampinf.exe" | Select-Object -First 1
+        $stampInf = Get-ChildItem packages -Recurse -Filter "stampinf.exe" | Where-Object { $_.Directory.Name -eq 'x86' } | Select-Object -First 1
         if (-not $stampInf) { throw "stampinf.exe not found in packages" }
         $stampInfDir = Split-Path $stampInf.FullName
         $env:PATH = "$stampInfDir;$env:PATH"

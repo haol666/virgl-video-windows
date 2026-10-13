@@ -7,8 +7,7 @@
   viogpusc) BEFORE Driver.Common.props -> Microsoft.Cpp.Default.props.
 
   Ported from driver/wdk.props (Microsoft.Windows.WDK NuGet recipe,
-  VS2026-compatible).  PkgRoot points to ../../driver/packages so viogpudo
-  and vgvdo share the same NuGet cache.
+  VS2026-compatible).  PkgRoot points to ..\..\packages so viogpudo shares the same NuGet cache as vgvdo (nuget restore writes to packages/).
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" TreatAsLocalProperty="Platform">
   <PropertyGroup>
@@ -19,7 +18,7 @@
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and !('$(MSBuildAssemblyVersion)' >= '18.0')">10.0.26100.0</WindowsTargetPlatformVersion>
     <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' >= '18.0'">10.0.28000.2526</WDKVersion>
     <WDKVersion Condition="'$(WDKVersion)' == '' and !('$(MSBuildAssemblyVersion)' >= '18.0')">10.0.26100.6584</WDKVersion>
-    <PkgRoot>$(MSBuildThisFileDirectory)../../driver/packages</PkgRoot>
+    <PkgRoot>$(MSBuildThisFileDirectory)..\..\packages</PkgRoot>
   </PropertyGroup>
 
   <Target Name="LogWDKVersion" BeforeTargets="PrepareForBuild">

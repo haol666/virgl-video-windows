@@ -20,6 +20,7 @@
     <WDKVersion Condition="'$(WDKVersion)' == '' and !('$(MSBuildAssemblyVersion)' >= '18.0')">10.0.26100.6584</WDKVersion>
     <PkgRoot>$(MSBuildThisFileDirectory)..\..\packages</PkgRoot>
     <EnableApiValidation>false</EnableApiValidation>
+    <ApiValidator_Enable>false</ApiValidator_Enable>
   </PropertyGroup>
 
   <Target Name="LogWDKVersion" BeforeTargets="PrepareForBuild">

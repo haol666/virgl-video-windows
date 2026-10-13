@@ -1,15 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Directory.Build.targets - overrides set AFTER WDK targets are imported.
-
-  WDK NuGet package (Microsoft.Windows.WDK.*) sets EnableApiValidation=true
-  by default, which causes ApiValidator.exe to run on user-mode exes
-  (viogpuap, viogpures, vgpusrv).  These exes call DDI functions that are
-  NOT in the whitelist, so ApiValidator exits with code 1 and breaks the
-  build.  Setting EnableApiValidation=false here (after WDK targets)
-  disables ApiValidator for ALL projects in this subtree.
--->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="Diagnostic-ApiValidation" BeforeTargets="Build">
+    <Message Text="DIAG: EnableApiValidation = $(EnableApiValidation)" Importance="high" />
+    <Message Text="DIAG: DriverPackageType = $(DriverPackageType)" Importance="high" />
+    <Message Text="DIAG: DriverTargetPlatform = $(DriverTargetPlatform)" Importance="high" />
+    <Message Text="DIAG: Directory.Build.targets imported from $(MSBuildProjectDirectory)" Importance="high" />
+  </Target>
   <PropertyGroup>
     <EnableApiValidation>false</EnableApiValidation>
   </PropertyGroup>

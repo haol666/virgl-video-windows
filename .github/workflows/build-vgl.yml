@@ -1,0 +1,30 @@
+name: build-vgl
+
+on:
+  push:
+    paths: ['vgl/**', '.github/workflows/build-vgl.yml']
+  pull_request:
+    paths: ['vgl/**']
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure libvgl (MSVC x64)
+        run: cmake -S vgl -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Unit tests (wire contract)
+        run: ctest --timeout 60 -C Release --output-on-failure
+        working-directory: build
+
+      - name: Show artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse build -Filter *.lib | Select-Object FullName
+          Get-ChildItem -Recurse build -Filter test_wire.exe | Select-Object FullName

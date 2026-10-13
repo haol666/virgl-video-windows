@@ -1,0 +1,44 @@
+name: build-ffmpeg
+
+# M2 stage workflow: full FFmpeg build (rustdesk-org/externals recipe) with
+# the h264_vgl encoder linked in, producing drop-in DLLs for RustDesk.
+# Kept manual until M2 bring-up; requires the externals fork with libvgl
+# wired into its build scripts.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['ffmpeg-h264-vgl/**']
+
+jobs:
+  windows-ffmpeg:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout externals fork (ffmpeg build recipes)
+        uses: actions/checkout@v4
+        with:
+          repository: haol666/externals
+          path: externals
+
+      - name: Stage vglenc.c + libvgl
+        shell: pwsh
+        run: |
+          Copy-Item ffmpeg-h264-vgl/vglenc.c externals/ -ErrorAction Stop
+          Write-Output "staged vglenc.c (M2: wire into externals ffmpeg build script)"
+
+      - name: Build libvgl
+        run: |
+          cmake -S vgl -B build -A x64
+          cmake --build build --config Release
+          ctest --test-run-timeout 60 -C Release --output-on-failure
+        working-directory: ${{ github.workspace }}
+
+      - name: FFmpeg build (M2 placeholder)
+        shell: pwsh
+        run: |
+          Write-Output "M2: externals ffmpeg build with vglenc.c integration - not yet enabled."
+          Write-Output "Blocked by: gate G1 (authoritative virgl_video_hw.h), M1 driver bring-up."
+          exit 1

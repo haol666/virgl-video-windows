@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  wdk.props - WDK-via-NuGet for vgvdo (VS2026 / MSBuild 18 on windows-2025
+  runner images, which ship neither WDK nor VS2022).
+
+  Ported from microsoft/ebpf-for-windows wdk.props (MIT,
+  https://github.com/microsoft/ebpf-for-windows) - the proven recipe for
+  building KMDF drivers on GitHub-hosted runners today.  Differences:
+  paths anchored to this file (driver\) + repo-root packages\ instead of
+  $(SolutionDir), because vgvdo.vcxproj is built without a solution.
+
+  The WDK NuGet import below provides the WindowsKernelModeDriver10.0
+  toolset for VS2026 (including Microsoft.DriverKit.Build.Tasks.18.0.dll,
+  which the older 26100 WDK does not ship).
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" TreatAsLocalProperty="Platform">
+  <PropertyGroup>
+    <!-- WDK/SDK selection by MSBuild major version (17=VS2022, 18=VS2026).
+         $(MSBuildAssemblyVersion) is always defined; $(VisualStudioVersion)
+         is not, and $(MSBuildToolsVersion) is "Current" on both. -->
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and '$(MSBuildAssemblyVersion)' &gt;= '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and '$(MSBuildAssemblyVersion)' &lt; '18.0'">10.0.26100.0</WindowsTargetPlatformVersion>
+    <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' &gt;= '18.0'">10.0.28000.2526</WDKVersion>
+    <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' &lt; '18.0'">10.0.26100.6584</WDKVersion>
+    <PkgRoot>$(MSBuildThisFileDirectory)..\packages</PkgRoot>
+  </PropertyGroup>
+
+  <Target Name="LogWDKVersion" BeforeTargets="PrepareForBuild">
+    <Message Importance="high" Text="Using WDK version $(WDKVersion), platform $(WindowsTargetPlatformVersion)" />
+  </Target>
+
+  <!-- SDK NuGet imports -->
+  <Import Project="$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.props" Condition="Exists('$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.props')" />
+  <Import Project="$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(Platform).$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.$(Platform).props" Condition="Exists('$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(Platform).$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.$(Platform).props')" />
+
+  <!-- WDK NuGet import (provides the WindowsKernelModeDriver10.0 toolset) -->
+  <Import Project="$(PkgRoot)\Microsoft.Windows.WDK.$(Platform).$(WDKVersion)\build\native\Microsoft.Windows.WDK.$(Platform).props" Condition="Exists('$(PkgRoot)\Microsoft.Windows.WDK.$(Platform).$(WDKVersion)\build\native\Microsoft.Windows.WDK.$(Platform).props')" />
+
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.targets" Condition="Exists('$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.targets')" />
+  </ImportGroup>
+
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.props')" Text="SDK CPP props missing - run nuget restore driver\packages.config -PackagesDirectory packages" />
+    <Error Condition="!Exists('$(PkgRoot)\Microsoft.Windows.SDK.CPP.$(Platform).$(WDKVersion)\build\native\Microsoft.Windows.SDK.cpp.$(Platform).props')" Text="SDK CPP $(Platform) props missing - run nuget restore driver\packages.config -PackagesDirectory packages" />
+    <Error Condition="!Exists('$(PkgRoot)\Microsoft.Windows.WDK.$(Platform).$(WDKVersion)\build\native\Microsoft.Windows.WDK.$(Platform).props')" Text="WDK $(Platform) props missing - run nuget restore driver\packages.config -PackagesDirectory packages (VS2026 needs WDK 10.0.28000.2526)" />
+  </Target>
+</Project>

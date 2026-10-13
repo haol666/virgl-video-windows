@@ -1,0 +1,64 @@
+;
+; vgvdo.inf - VGL video bridge driver (KMDF, M1a skeleton).
+;
+; Bind target: the SECOND (non-display) virtio-gpu PCI function from
+; xml/virtio-gpu-dual.xml.  Windows keeps ranking viogpudo (WDDM, Display
+; class) first for the display instance; this driver is bound to the video
+; instance explicitly via devcon / pnputil on that instance's device path
+; (design doc 1.1, 2.2).  Test-signing must be enabled on the VM
+; (bcdedit /set testsigning on) - this INF ships with zero signatures.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ProviderName%
+CatalogFile = vgvdo.cat
+DriverVer   = 10/13/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+vgvdo.sys = 1,,
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDescription% = Install, PCI\VEN_1AF4&DEV_1050
+
+[Install.NT]
+CopyFiles = Drivers_Dir
+
+[Install.NT.Services]
+AddService = vgvdo,0x00000002,vgvdo_Service_Inst
+
+[vgvdo_Service_Inst]
+DisplayName    = %ServiceName%
+Description    = %ServiceDesc%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START (bound explicitly)
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\vgvdo.sys
+
+[Install.NT.Wdf]
+KmdfService = vgvdo, vgvdo_wdfsect
+
+[vgvdo_wdfsect]
+KmdfLibraryVersion = 1.15        ; inbox on every Win10+ target
+
+[Drivers_Dir]
+vgvdo.sys
+
+[Strings]
+ProviderName      = "haol666 (personal, test-signed)"
+ManufacturerName  = "VGL"
+DiskName          = "VGL video bridge install"
+DeviceDescription = "VGL Video Bridge (virtio-gpu video passthrough)"
+ServiceName       = "vgvdo"
+ServiceDesc       = "VGL video bridge driver (pipe only, no protocol)"

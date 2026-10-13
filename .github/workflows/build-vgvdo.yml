@@ -1,0 +1,60 @@
+name: build-vgvdo
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['driver/**', '.github/workflows/build-vgvdo.yml']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Fetch virtio-win (VirtIO library source, consumed by M1b)
+      run: |
+        git clone --depth 1 https://github.com/virtio-win/kvm-guest-drivers-windows.git third_party\kdgw
+        if (Test-Path third_party\kdgw\VirtIO\VirtioLib.vcxproj) {
+          "VirtIO library present (M1b dependency verified): VirtIOPCICommon/Modern.c + VirtIORing.c"
+        } else {
+          throw "VirtIO\VirtioLib.vcxproj not found in clone - layout changed upstream?"
+        }
+
+    - name: Restore WDK/SDK NuGet packages (VS2026-compatible WDK, eBPF recipe)
+      run: |
+        $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
+        if (-not $nuget) {
+          Invoke-WebRequest -Uri https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile _nuget.exe
+          $nuget = "$PWD\_nuget.exe"
+        }
+        & $nuget restore driver\packages.config -PackagesDirectory packages -NonInteractive
+        if ($LASTEXITCODE -ne 0) { throw "nuget restore failed" }
+        "restored packages:"; (Get-ChildItem packages).Name
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build vgvdo (Release x64, KMDF)
+      run: msbuild driver\vgvdo.vcxproj /p:Configuration=Release /p:Platform=x64 /m /v:m
+
+    - name: Collect outputs
+      run: |
+        Copy-Item driver\vgvdo.inf driver\build\vgvdo.inf
+        $sys = Get-ChildItem driver\build -Recurse -Filter vgvdo.sys | Select-Object -First 1
+        if (-not $sys) { throw "vgvdo.sys not produced under driver\build" }
+        Get-ChildItem driver\build -Recurse -File |
+          Where-Object { $_.Extension -in '.sys', '.inf', '.pdb' } |
+          Select-Object FullName, Length | Format-Table -AutoSize | Out-String
+        Copy-Item $sys.FullName driver\build\vgvdo.sys
+        $pdb = Get-ChildItem driver\build -Recurse -Filter vgvdo.pdb | Select-Object -First 1
+        if ($pdb) { Copy-Item $pdb.FullName driver\build\vgvdo.pdb }
+
+    - name: Upload driver artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: vgvdo-driver-x64
+        path: |
+          driver/build/vgvdo.sys
+          driver/build/vgvdo.inf
+          driver/build/vgvdo.pdb

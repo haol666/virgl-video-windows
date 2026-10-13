@@ -1,0 +1,21 @@
+# build artifacts
+build/
+builds/
+*.lib
+*.obj
+*.exe
+*.dll
+*.pdb
+*.exp
+out/
+cmake-build-*/
+
+# rider/vs
+.vs/
+.vscode/
+.idea/
+
+# logs & scratch
+*.log
+.temp/
+__pycache__/

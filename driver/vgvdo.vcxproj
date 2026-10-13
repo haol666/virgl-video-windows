@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  vgvdo.vcxproj - VGL video bridge driver (KMDF, M1a skeleton).
+
+  Pure WDF skeleton; M1b links VirtIOLib (vendor/virtio-win) for the virtio
+  transport.  Signing is disabled - the driver is test-signed at install
+  time on the target VM.  Requires WDK 10 (PlatformToolset
+  WindowsKernelModeDriver10.0) as present on GitHub windows-latest runners.
+-->
+<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{9E7C4A21-6B58-4C3D-8F0A-41D5C29E8B77}</ProjectGuid>
+    <RootNamespace>vgvdo</RootNamespace>
+    <ProjectName>vgvdo</ProjectName>
+  </PropertyGroup>
+
+  <!-- WDK via NuGet (must precede Default.props; sets WindowsTargetPlatformVersion
+       + provides the WindowsKernelModeDriver10.0 toolset for VS2026 runners) -->
+  <Import Project="wdk.props" />
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <TargetVersion>Windows10</TargetVersion>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>KMDF</DriverType>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <TargetVersion>Windows10</TargetVersion>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(MSBuildProjectDirectory)\build\$(Configuration)\$(Platform)\</OutDir>
+    <IntDir>$(MSBuildProjectDirectory)\build\obj\$(Configuration)\$(Platform)\</IntDir>
+    <EnableInf2cat>false</EnableInf2cat>
+    <SignMode>Off</SignMode>
+    <TreatWarningAsError>true</TreatWarningAsError>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildProjectDirectory)\..\vgl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <WppEnabled>false</WppEnabled>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
+  <!-- INF ships as a plain file (static DriverVer, no stampinf tool on the
+       NuGet-WDK toolchain; WDK's <Inf> item would invoke stampinf.exe from
+       the absent Windows Kits install).  Validated at install time on the
+       VM; revisit in M1b if InfVerif is wanted. -->
+  <ItemGroup>
+    <None Include="vgvdo.inf" />
+    <None Include="packages.config" />
+    <None Include="wdk.props" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClCompile Include="vgvdo.c" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="..\vgl\include\vgl\vgl_transport.h" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

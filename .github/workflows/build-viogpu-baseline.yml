@@ -1,0 +1,67 @@
+name: build-viogpu-baseline
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['third_party/viogpu/**', '.github/workflows/build-viogpu-baseline.yml']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Restore WDK/SDK NuGet packages (VS2026-compatible WDK, shared with vgvdo)
+      run: |
+        $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
+        if (-not $nuget) {
+          Invoke-WebRequest -Uri https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile _nuget.exe
+          $nuget = "$PWD\_nuget.exe"
+        }
+        & $nuget restore driver\packages.config -PackagesDirectory packages -NonInteractive
+        if ($LASTEXITCODE -ne 0) { throw "nuget restore failed" }
+        "restored packages:"; (Get-ChildItem packages).Name
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build viogpu (Release x64, Win10, all projects)
+      run: |
+        msbuild third_party\viogpu\viogpu.sln "/p:Configuration=Win10 Release" /p:Platform=x64 /m /v:m /nologo
+        if ($LASTEXITCODE -ne 0) { throw "msbuild failed with code $LASTEXITCODE" }
+        "build exit code: $LASTEXITCODE"
+
+    - name: Collect outputs
+      run: |
+        $out = "third_party\viogpu"
+        $artifacts = @()
+        # Kernel driver
+        $sys = Get-ChildItem $out -Recurse -Filter "viogpudo.sys" | Where-Object { $_.FullName -match 'objfre_win10_amd64' } | Select-Object -First 1
+        if ($sys) { Copy-Item $sys.FullName "$out\build\viogpudo.sys" }
+        $inf = Get-ChildItem $out -Recurse -Filter "viogpudo.inx" | Select-Object -First 1
+        if ($inf) { Copy-Item $inf.FullName "$out\build\viogpudo.inx" }
+        # User-mode exes
+        @('viogpuap','viogpures','vgpusrv') | ForEach-Object {
+          $exe = Get-ChildItem $out -Recurse -Filter "$_.exe" | Where-Object { $_.FullName -match 'objfre_win10_amd64' } | Select-Object -First 1
+          if ($exe) { Copy-Item $exe.FullName "$out\build\$_.exe" }
+          $pdb = Get-ChildItem $out -Recurse -Filter "$_.pdb" | Where-Object { $_.FullName -match 'objfre_win10_amd64' } | Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName "$out\build\$_.pdb" }
+        }
+        # Kernel pdb
+        $ksysPdb = Get-ChildItem $out -Recurse -Filter "viogpudo.pdb" | Where-Object { $_.FullName -match 'objfre_win10_amd64' } | Select-Object -First 1
+        if ($ksysPdb) { Copy-Item $ksysPdb.FullName "$out\build\viogpudo.pdb" }
+        # List all collected artifacts
+        Get-ChildItem "$out\build" -File | Select-Object Name, Length | Format-Table -AutoSize | Out-String
+
+    - name: Upload driver artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: viogpudo-baseline-x64
+        path: |
+          third_party/viogpu/build/viogpudo.sys
+          third_party/viogpu/build/viogpudo.inf
+          third_party/viogpu/build/viogpudo.pdb
+          third_party/viogpu/build/viogpuap.exe
+          third_party/viogpu/build/viogpures.exe
+          third_party/viogpu/build/vgpusrv.exe

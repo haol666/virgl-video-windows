@@ -1,0 +1,51 @@
+From 989727e8406d41006139ad4975069c8fb8d6e67e Mon Sep 17 00:00:00 2001
+From: haol666 <haol666@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 17:17:51 +0800
+Subject: [PATCH] support h264_vgl passthrough encoder on Windows guests
+
+Offer the h264_vgl encoder (virtio-gpu video protocol passthrough to
+the KVM host hardware, project haol666/virgl-video-windows) as a H.264
+candidate on Windows.
+
+No GPU vendor detection is required: the existing runtime probe in
+available_encoders() attempts a real 720p encode through FFmpeg and
+silently drops the candidate whenever the bridge is absent, so bare
+metal and non-KVM guests are unaffected. Priority is Good so local
+hardware encoders (nvenc/qsv/amf) still win on machines that have them.
+
+RustDesk needs no source change; a Cargo [patch] against this fork is
+enough to enable it.
+---
+ src/ffmpeg_ram/encode.rs | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/src/ffmpeg_ram/encode.rs b/src/ffmpeg_ram/encode.rs
+index f9b8d77..4f17331 100644
+--- a/src/ffmpeg_ram/encode.rs
++++ b/src/ffmpeg_ram/encode.rs
+@@ -195,6 +195,22 @@ impl Encoder {
+                 _nv, amf, _intel
+             );
+ 
++            #[cfg(windows)]
++            {
++                // vgl: H.264 encoding passthrough to the KVM host hardware
++                // (Unraid VCN) via the virtio-gpu video protocol - project
++                // haol666/virgl-video-windows. No vendor detection needed:
++                // the runtime probe below attempts a real 720p encode via
++                // FFmpeg's h264_vgl and silently drops the candidate when
++                // the bridge is absent (bare-metal / non-KVM guests).
++                codecs.push(CodecInfo {
++                    name: "h264_vgl".to_owned(),
++                    format: H264,
++                    priority: Priority::Good as _,
++                    ..Default::default()
++                });
++            }
++
+             #[cfg(windows)]
+             if _intel && contains(Driver::MFX, H264) {
+                 codecs.push(CodecInfo {
+-- 
+2.55.0.windows.3
+

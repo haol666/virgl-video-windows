@@ -1,0 +1,59 @@
+name: build-hwcodec
+
+on:
+  push:
+    branches: [main]
+    paths: ['hwcodec-patch/**', '.github/workflows/build-hwcodec.yml']
+  pull_request:
+    paths: ['hwcodec-patch/**']
+  workflow_dispatch:
+
+jobs:
+  patch-parity:
+    # Fast structural gate: haol666/hwcodec@vgl-support must be exactly
+    # upstream 31c6d..31ce749 + our patch, byte for byte.  Full cargo
+    # compile needs vcpkg+FFmpeg (an hour cold) and is deferred to M2
+    # (full-build job, manual dispatch only).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout design repo (patch)
+        uses: actions/checkout@v4
+
+      - name: Checkout fork (vgl-support)
+        uses: actions/checkout@v4
+        with:
+          repository: haol666/hwcodec
+          ref: vgl-support
+          path: fork
+
+      - name: Checkout upstream base
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk-org/hwcodec
+          ref: 31dce749e8ba76894df059b35a946d1e9c49ac35
+          path: upstream
+
+      - name: Apply patch and compare
+        shell: bash
+        run: |
+          cd upstream
+          git apply --check ../hwcodec-patch/0001-support-h264_vgl-on-windows.patch
+          git apply ../hwcodec-patch/0001-support-h264_vgl-on-windows.patch
+          if ! diff -u src/ffmpeg_ram/encode.rs ../fork/src/ffmpeg_ram/encode.rs; then
+            echo "::error::fork vgl-support diverges from upstream+patch"
+            exit 1
+          fi
+          echo "patch parity verified: fork == upstream(31dce749) + h264_vgl patch"
+
+  full-build:
+    # Deferred to M2: complete cargo build mirroring upstream's
+    # windows-vram.yml (vcpkg pinned commit + rustdesk ports overlay +
+    # externals FFmpeg).  Manual dispatch only - about an hour cold.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    steps:
+      - name: M2 placeholder
+        shell: pwsh
+        run: |
+          Write-Output "full-build lands with M2 (externals FFmpeg integration)."
+          Write-Output "blocked by: gate G1 (authoritative virgl_video_hw.h)."

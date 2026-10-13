@@ -1,0 +1,47 @@
+<!--
+  Dual virtio-gpu device topology for Windows VM (design doc §1.1).
+
+  Device #1 (existing): virtio-gpu display instance, bound to viogpudo
+  (WDDM 2D display driver) - UNCHANGED, keeps RustDesk DXGI capture.
+
+  Device #2 (new): headless virtio-gpu instance with virgl enabled,
+  dedicated to the video protocol commands; bound by the vgvdo bridge
+  driver on the Windows side.
+
+  This is VM-definition-layer configuration only: no host side change
+  (handover doc §3.5 freeze respected).
+
+  Unraid / libvirt XML: insert into <domain> of the Windows VM.
+  The first GPU device (virtio-gpu declared by Unraid UI) must stay
+  untouched; the second is added via qemu:commandline with a distinct
+  bus/slot so PCI addressing is deterministic for driver binding.
+-->
+
+<domain>
+  <!-- ...existing domain config... -->
+
+  <qemu:commandline xmlns:qemu="http://libvirt.org/schemas/domain/qemu/1.0">
+    <!-- headless video-capable virtio-gpu instance for vgvdo -->
+    <qemu:arg value="-device"/>
+    <qemu:arg value="virtio-gpu-pci,id=vgpu1,bus=pcie.0,addr=0x09,virgl=on,edid=off,xres=0,yres=0"/>
+    <!-- reserve host memory hint only if needed; video surfaces live in guest RAM via ATTACH_BACKING -->
+  </qemu:commandline>
+</domain>
+
+<!--
+  M1 checklist for this fragment:
+  [ ] QEMU accepts the second virtio-gpu device (Unraid 7.3 QEMU >= 8.2)
+  [ ] Windows PnP enumerates two virtio-gpu PCI devices (device manager)
+  [ ] vgvdo test-signed driver binds ONLY the 0x09 slot instance
+      (hardware-id match plus slot filter; viogpudo keeps the display one)
+  [ ] Host QEMU log shows DBG create_codec when the guest sends commands
+      on the headless instance (handover §2, acceptance M1)
+  [ ] Confirm virglrenderer patch handles a no-display virtio-gpu
+      instance for video commands (design doc §1.1 M1 must-test item)
+
+  Notes:
+  - addr=0x09 is an example; pick a free slot in your VM and keep it
+    deterministic so the bridge driver's binding filter stays simple.
+  - xres=0/yres=0 with edid=off keeps the second instance from creating
+    a phantom monitor in the guest.
+-->

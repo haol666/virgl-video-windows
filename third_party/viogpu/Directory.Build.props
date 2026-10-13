@@ -4,7 +4,7 @@
 
   Placed under third_party/viogpu/ so it is automatically imported by all
   vcxproj files in that subtree (VirtioLib, viogpudo, viogpuap, viogpures,
-  viogpusc) BEFORE Driver.Common.props → Microsoft.Cpp.Default.props.
+  viogpusc) BEFORE Driver.Common.props -> Microsoft.Cpp.Default.props.
 
   Ported from driver/wdk.props (Microsoft.Windows.WDK NuGet recipe,
   VS2026-compatible).  PkgRoot points to ../../driver/packages so viogpudo
@@ -16,9 +16,9 @@
          $(MSBuildAssemblyVersion) is always defined; $(VisualStudioVersion)
          is not, and $(MSBuildToolsVersion) is "Current" on both. -->
     <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and '$(MSBuildAssemblyVersion)' >= '18.0'">10.0.28000.0</WindowsTargetPlatformVersion>
-    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and '$(MSBuildAssemblyVersion)' < '18.0'">10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == '' and !('$(MSBuildAssemblyVersion)' >= '18.0')">10.0.26100.0</WindowsTargetPlatformVersion>
     <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' >= '18.0'">10.0.28000.2526</WDKVersion>
-    <WDKVersion Condition="'$(WDKVersion)' == '' and '$(MSBuildAssemblyVersion)' < '18.0'">10.0.26100.6584</WDKVersion>
+    <WDKVersion Condition="'$(WDKVersion)' == '' and !('$(MSBuildAssemblyVersion)' >= '18.0')">10.0.26100.6584</WDKVersion>
     <PkgRoot>$(MSBuildThisFileDirectory)../../driver/packages</PkgRoot>
   </PropertyGroup>
 

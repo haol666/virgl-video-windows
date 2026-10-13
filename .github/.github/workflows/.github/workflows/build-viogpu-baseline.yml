@@ -23,6 +23,16 @@ jobs:
         if ($LASTEXITCODE -ne 0) { throw "nuget restore failed" }
         "restored packages:"; (Get-ChildItem packages).Name
 
+    - name: Add WDK bin to PATH (stampinf.exe)
+      shell: pwsh
+      run: |
+        $stampInf = Get-ChildItem packages -Recurse -Filter "stampinf.exe" | Select-Object -First 1
+        if (-not $stampInf) { throw "stampinf.exe not found in packages" }
+        $stampInfDir = Split-Path $stampInf.FullName
+        "stampinf.exe: $($stampInf.FullName)"
+        "Adding $($stampInfDir) to PATH"
+        $env:PATH = "$stampInfDir;$env:PATH"
+
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 

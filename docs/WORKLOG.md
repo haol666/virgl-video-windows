@@ -565,3 +565,59 @@ viogpudo 为 KMDF 驱动但 `DriverType=WDM` → 触发本轮两个隐藏构建�
       REAP/WAIT/PIN/UNPIN
 - [ ] L1 起跑：libvgl 在 VM 上编译 + transport 无设备路径探测
 
+
+---
+
+## W9 · 2026-10-15 · M1a-v2 部署测试：两次硬挂死 + 根因 + M1a-v3
+
+**做了什么**
+
+1. **M1a-v2 CI 构建成功**（run 38595767113, commit 6f76c70）：
+   viogpudo.sys 108032B。
+2. **首次部署**（staging 包 inf2cat 0 错 + signtool 签名）：
+   - 陷阱1：inf2cat DriverVer 日期写 10/15 但系统日期是 10/14 →
+     22.9.7 "postdated DriverVer not allowed" → 改回 10/14 版本号 bump。
+   - 陷阱2：test_vgl.ps1 三连 bug：GENERIC_READ|WRITE 相或成负 int32
+     （0xC0000000 溢出）→ uint32 字面量；路径 \\\\.\\ 过度转义 →
+     \\.\；-1 句柄比较要 ToInt64()。
+3. **pnputil 安装成功 + 设备 OK + 服务 Running + 系统未死机**
+   ——M1a-v2 驱动本体加载正常（W8 修复生效）。
+4. **但 CreateFile("\\\\\.\\VGLVIDEO0") 触发硬挂死（两次，模式一致）**：
+   - 00:17 安装后跑 test_vgl → 死机；00:26 空闲探测 → 死机；
+   - BugcheckCode=0、无 dump、WPP ETL 仅 8KB header（缓冲未刷）；
+   - 每次都是打开 VGLVIDEO0 符号链接后数秒内全机冻结。
+5. **根因定位（代码审查）**：M1a-v2 的 VglAttachToDriverObject
+   挂钩了 dxgkrnl 拥有的 DRIVER_OBJECT 分发表并转发非 CDO IRP：
+   - dxgkrnl 运行期管理该表且显示路径高频 IRP 都走它；
+   - 我们的转发层（PAGED_CODE + 页面换入风险）与 dxgkrnl 竞争
+     → 显示线程内核死锁 → BugcheckCode=0 硬挂。
+6. **防护措施**：设备禁用（CM_PROB_DISABLED）+ 官方 sys 恢复，
+   开发期间保持禁用。
+7. **M1a-v3 修复**（commit 9108634 / 远端 7902025）：VglInit 在
+   DriverEntry 用 IoCreateDriver(NULL, VglDriverEntry) 创建
+   **独立 DRIVER_OBJECT** 拥有 VGLVIDEO0——dxgkrnl 分发表完全
+   不动，CDO 生命周期=镜像生命周期（还消除 PnP 重启竞态）。
+   Dispatcher 无 PAGED_CODE，只碰非分页数据。StartDevice 仅
+   VglUpdateCaps 刷新缓存 msix。
+
+**发现与教训**
+
+- **KMDOD 的 DRIVER_OBJECT 是 dxgkrnl 领地**：运行期它改分发表
+  （IRP_MJ_PNP 等），显示路径 IRP 全走这个表。任何挂钩+转发都是
+  与 dxgkrnl 竞速——必须用 IoCreateDriver 独立驱动对象隔离。
+- **BugcheckCode=0 硬挂死 vs 蓝屏**：无 dump 无 ETL（缓冲不落盘），
+  事件日志只有 41/6008。此类死机只能靠时间线+代码审查定位。
+- **WPP 对死锁无效**：ETL flush 是定时/正常路径，硬挂死时来不及。
+  下一次若再死机需 WinDbg KDNET（挂死时 Ctrl+Scroll+Scroll+Lock
+  或 KD break 手动中断看栈）。
+- **IoCreateDriver 的正确定位**：第二驱动对象 INIT 段入口
+  （VglDriverEntry 带自己的分发表填充），与 CDO 一同存活整个
+  镜像生命周期，DriverUnload NULL（镜像归显示驱动管）。
+- inf2cat 校验 DriverVer 不得晚于系统日期——staging 前先看 Get-Date。
+
+**下一步**
+
+- [ ] M1a-v3 CI 产物 → 部署 → Enable 设备 → CreateFile/GET_INFO
+      验证（预期不再死机）
+- [ ] 若 v3 仍挂：WinDbg KDNET 双机 + 手动 break 看挂死栈
+- [ ] M1b：VirtIOLib 数据面接线（SUBMIT/REAP/WAIT/PIN/UNPIN）

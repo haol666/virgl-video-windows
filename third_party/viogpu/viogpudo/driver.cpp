@@ -115,6 +115,14 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     {
         DbgPrint(TRACE_LEVEL_ERROR, ("DxgkInitializeDisplayOnlyDriver failed with Status: 0x%X\n", Status));
     }
+    else
+    {
+        // VGL bridge (M1a-v2): hook IRP_MJ_CREATE/CLOSE/DEVICE_CONTROL only
+        // AFTER dxgkrnl has installed its own entries, so the originals can
+        // be saved and forwarded for IRPs that do not target our CDO.
+        // Must happen before any device start can create \Device\VGLVIDEO0.
+        VglAttachToDriverObject(pDriverObject);
+    }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return Status;

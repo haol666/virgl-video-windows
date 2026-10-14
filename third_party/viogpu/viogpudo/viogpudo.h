@@ -29,12 +29,15 @@
 
 #pragma once
 
-#include <wdf.h>
 #include "viogpu.h"
 #include "viogpu_queue.h"
 
 // VGL video bridge transport contract (shared with libvgl user-mode)
 #include "vgl/vgl_transport.h"
+
+// W8 root cause: KMDOD cannot use KMDF - DxgkInitializeDisplayOnlyDriver never
+// binds the WdfFunctions table (in-box KMDODs import no WDFLDR.SYS).  The VGL
+// bridge therefore uses a plain WDM control device (vglctl.cpp, M1a-v2).
 
 #pragma pack(push)
 #pragma pack(1)
@@ -248,9 +251,6 @@ class VioGpuDod
     DXGKARG_SETPOINTERSHAPE m_PointerShape;
     VioGpuAdapter *m_pHWDevice;
 
-    // VGL video bridge channel: custom IOCTL queue on the display WDFDEVICE
-    WDFQUEUE m_VglQueue;
-
     USHORT m_PersistentDispMode0Width;
     USHORT m_PersistentDispMode0Height;
 
@@ -412,22 +412,13 @@ class VioGpuDod
     VOID BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo, PVIDEO_MODE_INFORMATION pModeInfo);
 };
 
-// Context block allocated on the VGL WDFQUEUE so that the IOCTL dispatch
-// callback can reach back to VioGpuDod (for MSI-X status and future
-// SUBMIT/REAP/WAIT/PIN/UNPIN implementations that need VirtIODevice state).
-typedef struct _VIOGPU_VGL_QUEUE_CONTEXT {
-    VioGpuDod *pDod;
-} VIOGPU_VGL_QUEUE_CONTEXT, *PVIOGPU_VGL_QUEUE_CONTEXT;
-
-// Register the context type with KMDF so WdfObjectGetTypedContext/WdfObjectAllocateContext
-// can allocate and retrieve VIOGPU_VGL_QUEUE_CONTEXT blocks. Required because
-// viogpudo uses DriverType=WDM (not KMDF), so the framework does not auto-register
-// context types for WDM drivers.
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VIOGPU_VGL_QUEUE_CONTEXT, VglGetContext)
-
-// VGL video bridge IOCTL dispatch callback (registered on a custom WDFQUEUE
-// attached to the display WDFDEVICE). Forwarded to VioGpuAdapter state for
-// SUBMIT/REAP/WAIT/PIN/UNPIN (M1b); M1a returns STATUS_NOT_IMPLEMENTED.
-VOID VglIoDeviceControl(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request,
-                        _In_ size_t OutputBufferLength, _In_ size_t InputBufferLength,
-                        _In_ ULONG IoControlCode);
+// --------------------------------------------------------------------
+// VGL video bridge (M1a-v2, plain WDM control device - vglctl.cpp).
+//
+// \Device\VGLVIDEO0 + \\DosDevices\\VGLVIDEO0 are created in StartDevice
+// after HWInit; IOCTLs are handled by the dispatch entries hooked in
+// DriverEntry (VglAttachToDriverObject).  GET_INFO serves transport info;
+// SUBMIT/REAP/WAIT/PIN/UNPIN return STATUS_NOT_IMPLEMENTED until M1b.
+VOID VglAttachToDriverObject(_In_ PDRIVER_OBJECT pDriverObject);
+NTSTATUS VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled);
+VOID VglControlDeviceDestroy(VOID);

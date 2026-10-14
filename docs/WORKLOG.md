@@ -322,8 +322,246 @@ M1a = 骨架契约面 + CI 打通；M1b = VirtIOLib 数据面（virtqueue/MSI-X/
 
 **下一步**
 
-- [ ] M1b：VirtIOLib 接入（PCI BAR/MSI-X/virtqueue + FENCE 中断→WAIT
+- [ ] M1b：VirtIOLib 接入（PCI BAR/MSR-X/virtqueue + FENCE 中断→WAIT
       + MDL PIN/UNPIN 实装，约 2-3k 行；VirtIO/ 源已在 CI 预检）
 - [ ] 上机：双设备 XML → testsigning → devcon 绑定第二实例 →
       `\\.\VGLVIDEO0` 打开 + GET_INFO 首验
+
+---
+
+## W6 · 2026-10-14 · 单卡方案：vgvdo 合并进 viogpudo + KMDF 链接修复 + CI 绿
+
+**背景（决策链）**：M1a 之后卡在"一块 virtio-gpu 显示设备已被 viogpudo
+（WDDM/Display 评级）独占"，双设备 XML 方案需第二实例绑定。用户拍板
+**单卡方案**：把 vgvdo 功能直接合并进 viogpudo 源码（在同一 WDFDEVICE
+上再建一个 VGL IOCTL 队列），宿主不动、只需一块 virtio-gpu。同时确认
+viogpudo 为 KMDF 驱动但 `DriverType=WDM` → 触发本轮两个隐藏构建坑。
+
+**做了什么**
+
+1. **vgvdo 合并进 viogpudo**（代码在 `third_party/viogpu/viogpudo/`）：
+   - `viogpudo.h`：`#include "vgl/vgl_transport.h"`（单一契约源，复用
+     L0/L1 边界的 6 IOCTL + vgl_tport_info_t）；新增 `VIOGPU_VGL_QUEUE_CONTEXT`
+     上下文块 + `WDF_DECLARE_CONTEXT_TYPE_WITH_NAME` 宏注册；
+     `GetHWDevice()` public getter（M1b 需访问 VioGpuAdapter 状态）；
+     `VglIoDeviceControl` 前向声明。
+   - `viogpudo.cpp`：构造函数 `m_VglQueue(WDF_NO_HANDLE)` 初始化；
+     `StartDevice` HWInit 成功后**在显示 WDFDEVICE 上创建 VGL 默认队列**
+     （WdfIoQueueCreate，sequential dispatch，`EvtIoDeviceControl`）+
+     `WdfDeviceCreateSymbolicLink(\DosDevices\VGLVIDEO0)`；
+     `VglIoDeviceControl`：GET_INFO 返回 vgl_tport_info_t
+     （magic='VGV1'，control_queue_depth=64，msix_enabled 取自
+     VioGpuAdapter PCI 资源）；SUBMIT/REAP/WAIT/PIN/UNPIN 返回
+     `STATUS_NOT_IMPLEMENTED`（M1b 接线 virtqueue）。
+   - `viogpudo.vcxproj`：ClCompile 加 `$(WDKContentRoot)Include\wdf\kmdf\1.15`
+     + `..\..\..\vgl\include`；Link 加 KMDF 库（见下方修复）。
+
+2. **KMDF 库链接修复（LNK2001 WdfFunctions_01015 / WdfDriverGlobals）**：
+   WDM 驱动（`DriverType=WDM`）不会被 WDK targets 自动链接
+   `wdfldr.lib`+`wdfdriverentry.lib`（`KMDF_INC_PATH`/`KMDF_LIB_PATH`
+   在 NuGet WDK 全程未定义）。第一版错误地加
+   `$(DDK_LIB_PATH)$(KMDF_VER_PATH)\WdfLdr.lib` → LNK1181
+   （DDK_LIB_PATH 指向 `c\lib\10.0.28000.0\km\x64\` 无 `1.15` 子目录）。
+   **正确路径**：`$(WDKContentRoot)Lib\wdf\kmdf\x64\$(KMDF_VER_PATH)\`
+   （`$(WDKContentRoot)`=`$(NuGetPackageFolder)\c`，KMDF 库实际在
+   `c\Lib\wdf\kmdf\x64\1.15\wdfldr.lib`）。修正后 8 个 Link 配置全对。
+
+3. **CI 打到绿**（KMDF 库路径修正后 push 自动触发）：
+
+   - Run 38516357067 @ commit `ccb87da`：**success**——`viogpudo.sys`
+     编译链接通过，Signability Errors/Warnings 均 None，`viogpudo.cat`
+     生成成功，PackOne 复制 10 个文件到 Install\Win10\amd64。
+   - 首次尝试经 GitHub REST API 用 **Trees API `base_tree` 增量更新**
+     （git push 超时，Contents API 走查 tree 又只产出 2 entry 的坑），
+     最终用 `POST /git/trees` 的 `base_tree`=旧 tree SHA + 仅含变更的
+     vcxproj entry → 新 tree SHA 与本地 commit 逐字节一致。推送成功。
+
+**发现与教训**
+
+- **git push 三路全废**（origin 直连/gh-proxy.com 均超时）→ 本机
+  结论性放弃 git 协议，**REST API 是唯一通路**；且 **Git Data API
+  更新 ref 不产生 push 事件** → CI 需手动 `workflow_dispatch` 或
+  Contents API 提交（真实 push event）。
+- **Trees API 的 `base_tree` 增量更新可用**：只 POST 变更 entry，
+  新 tree 继承 base_tree 全部条目；new tree SHA 与本地 commit tree
+  一致=字节级验证。大幅省 API 调用。
+- **本地与远端 main 已分叉**（本地 HEAD 领先远端多轮 CI fix），
+  `git diff ad9b852...04dd5bb` 报 "no merge base" → 直接 `git diff`
+  两 commit（`git diff <sha1> <sha2>`）即可。
+- `git cat-file blob <sha>` 读 blob 内容；`git show :<sha>` 对 blob
+  SHA 无效（`:` 后跟路径）。API 提交保真必须用 `cat-file blob`。
+- 遗留：本条目 CI 用的是**重新推送合并的 HEAD**（单 commit 衔接
+  ad9b852）；本地 main 仍有多轮历史，后续可保留或 squash（不影响
+  CI 结果）。
+
+---
+
+## W7 · 2026-10-14 · 驱动签名攻坚 + 部署 + phantom 设备
+
+**做了什么**
+
+1. **L0 代码合并完成**：vgvdo 的 VGL IOCTL 队列 + `\\.\VGLVIDEO0`
+   符号链接合并进 viogpudo；CI 编译链接通过（run 38516357067,
+   commit `ccb87da`），Signability 零错。
+2. **部署 CI artifact 到 VM**：sys 107520B + pdb + inx + 3 exe，
+   部署到 DriverStore 和 System32\drivers。
+3. **CM_PROB_UNSIGNED_DRIVER (52) 排查**：
+   - `bcdedit /set testsigning on` + `isolatedcontext No` +
+     `nointegritychecks on` 均设了，但内核未真正激活
+     （pending，需重启）；
+   - `sc start VioGpuDod` 返回 577：未签名驱动被拒；
+   - **根因**：Server 2016 的 HVCI 即使 `isolatedcontext=No`
+     仍可能阻止未签名驱动；`nointegritychecks` 需重启才生效。
+4. **签名方案（关键突破）**：
+   - **自签名证书**：`New-SelfSignedCertificate -Type CodeSigningCert`
+     → CN=VirGlVideoTest，Thumbprint `2DD2BFEC97E5D86D2C3A74716FE435B5AA238602`；
+   - **添加到三个信任存储**：Root + TrustedPeople + TrustedPublisher
+     （缺一不可，否则 `0x800b0109 CERT_E_UNTRUSTEDROOT`）；
+   - **inf2cat 创建 catalog**：用 WDK NuGet 包中的
+     `C:\Users\Administrator\.nuget\packages\microsoft.windows.wdk.x64\10.0.28000.2526\c\bin\10.0.28000.0\x86\Inf2Cat.exe`
+     + `/os:Server6_3_X64`，signability 测试零错，生成 viogpudo.cat；
+   - **签署 .cat**：`Set-AuthenticodeSignature -Certificate $cert`
+     + `-TimestampServer http://timestamp.digicert.com`；
+   - **INF 中添加 CatalogFile=viogpudo.cat**；
+   - `pnputil /add-driver viogpudo.inf /install` 成功（oem12.inf）。
+5. **PE 校验和修复（未用上但值得记录）**：
+   - MSVC 输出的 sys PE 校验和为 0x00100000（占位值），内核会
+     拒绝校验和不正确的驱动；
+   - 正确算法：32 位字相加后取反（`-bxor` 运算）；
+   - 最终因改用 cat 签名方案而未用到此修复。
+6. **部署后设备状态**：`CM_PROB_PHANTOM`——PCI 设备在 VM 中被
+   隐藏（切换到 QXL 显示设备），需要重新扫描硬件。
+7. **静态验证（W8 前完成）**：
+   - **inf2cat signability**：0 errors, 0 warnings ✅
+   - **signtool 签署**：SYS + CAT 均 Valid（CN=VirGlVideoTest）✅
+   - **PE Checksum**：MSVC 输出 0x00100000（占位值），正确值
+     0xD7D5B030（对 unsigned 文件）/ 0x72C7EFE8（对 signed 文件）；
+     签名过程修改文件导致 checksum stale，需在 CI 中加
+     `link /RELEASE` 或 `editbin /RELEASE` 修复 ⚠️
+   - **stampinf**：INF 格式正确，DriverVer/CatalogFile 正常 ✅
+
+**发现与教训**
+
+- **WDK 工具位置**：`C:\Users\Administrator\.nuget\packages\microsoft.windows.wdk.x64\10.0.28000.2526\c\bin\10.0.28000.0\`
+  下分 ARM64/x64/x86 三个架构目录，inf2cat 在 x86 目录，
+  stampinf 在 ARM64 和 x64 目录；签名工具 **不在 Windows Kits**
+  目录下（那个目录根本不存在），只在 NuGet 包中。
+- **驱动签名三步曲**（Test Signing 模式下）：
+  1. 自签名代码签名证书（CodeSigningCert 类型）+ 添加到 Root/
+     TrustedPeople/TrustedPublisher 三个存储；
+  2. inf2cat 创建 .cat（需先 INF 中有 CatalogFile 引用）；
+  3. 签署 .cat 文件。
+- **DriverStore INF 锁定问题**：系统进程会锁定 DriverStore 中的
+  INF 文件，用 .NET `WriteAllText` 有时成功有时失败；pnputil
+  `/add-driver /install` 是更可靠的方式。
+- **phantom 设备**：`CM_PROB_PHANTOM` 意味着设备实例在 PnP 树中
+  不存在（PCI 设备被隐藏或移除），需要重新扫描总线或重启 VM。
+
+**下一步**
+
+- [x] 重新扫描 PCI 总线恢复 viogpudo 设备，验证驱动加载和
+      `\\.\VGLVIDEO0` 打开（见 W8）
+- [x] 静态验证 viogpudo.sys（inf2cat + signtool + PE checksum）
+- [ ] 动态加载/卸载调试（换 virtio-gpu 后，M1a-v2 构建落地即可测）
+- [ ] M1b：VirtIOLib 数据面（virtqueue/MSI-X/MDL PIN）接线 SUBMIT/
+      REAP/WAIT/PIN/UNPIN
+- [ ] L1 起跑：libvgl 在 VM 上编译 + transport 无设备路径探测
+
+---
+
+## W8 · 2026-10-14 · 启动死机根因分析 + M1a-v2（WDM CDO 重写）
+
+**做了什么**
+
+1. **官方驱动完整恢复**：viogpudo.sys.bak（107528B，MS WHCP 签名）
+   恢复到 DriverStore + System32\drivers；oem12.inf 重注册
+   （DriverVer 07/21/2023 官方版本号），VM 切 virtio-gpu 重启后
+   正常进入系统。验证了"官方驱动可正常启动"这一对照面。
+2. **换卡后状态记录**：QXL → phantom（已移除），virtio-gpu DOD →
+   CM_PROB_DISABLED（禁用态保住），系统稳定 17+ 分钟——这是动态
+   测试的理想起点（设备在、驱动不跑）。
+3. **静态审代码后发现致命疑点**：W6 合并代码在 StartDevice 里调
+   `WdfIoQueueCreate`，而 DriverEntry 只调 `DxgkInitializeDisplayOnlyDriver`。
+4. **根因确凿（PE 导入表实证）**：
+   - 自写 PowerShell PE 解析器读导入表：**我们的 sys 与官方 viogpudo
+     都只导入 ntoskrnl.exe + HAL.dll**；
+   - 对照：系统内所有真 KMDF 驱动（monitor.sys、UsbHub3.sys）都
+     **额外导入 WDFLDR.SYS**（绑定 WdfFunctions 表的运行时机制）；
+   - 微软自家 KMDOD（qxldod.sys、BasicDisplay.sys）同样不导入
+     WDFLDR.SYS → **KMDOD 体系根本不绑定 KMDF 运行时**；
+   - wdfldr.lib 只是 WDFLDR.SYS 的导入库（字符串扫描确认只含
+     _WdfVersionBind 等桩符号），不提供 WdfFunctions_01015 实现；
+   - 结论：`WdfIoQueueCreate` 通过零值函数表调用 → 启动即刻 BSOD
+     → "换驱动后无法启动"的根因。基准版viogpudo（无 WDF 调用）
+     加载正常也是旁证。
+5. **PE checksum 伪问题定案**：官方 sys 的 checksum 同样是 0x00100000
+   （MSVC 占位值），demand-start 驱动内核不校验 checksum →
+   之前两轮"修 checksum→签名→checksum 又坏"是无效循环，停止。
+   （CI 侧仍值得加 `/RELEASE` 链接选项，仅作规范化。）
+6. **M1a-v2 重写（纯 WDM，弃 KMDF）**：
+   - 新文件 `vglctl.cpp`：DriverEntry 保存 dxgkrnl 原始 IRP_MJ_CREATE/
+     CLOSE/DEVICE_CONTROL 分发入口并挂 Vgl 三件套（非本 CDO 的 IRP
+     原样转发）；StartDevice→`VglControlDeviceCreate`（IoCreateDevice
+     `\Device\VGLVIDEO0` + IoCreateSymbolicLink `\\DosDevices\VGLVIDEO0`，
+     失败非致命）；StopDevice/析构→`VglControlDeviceDestroy`；
+     GET_INFO 用缓存的 g_VglMsixEnabled，M1b 数据面 IOCTL 返回
+     STATUS_NOT_IMPLEMENTED；
+   - `viogpudo.h`：删 `<wdf.h>`/m_VglQueue/WDF 上下文结构体/
+     WDF_DECLARE_CONTEXT_TYPE/VglIoDeviceControl 声明，换 WDM 三 API
+     声明（带根因注释防复发）；
+   - `viogpudo.cpp`：StartDevice 的 KMDF 队列块→VglControlDeviceCreate
+     （传 `m_pHWDevice->IsMSIEnabled()`）；StopDevice+析构加 Destroy
+     安全网；删文件尾 WDF 版 VglIoDeviceControl；
+   - `driver.cpp`：DriverEntry 在 DxgkInitializeDisplayOnlyDriver
+     成功后调 VglAttachToDriverObject（必须在 dxgkrnl 装好自己的
+     分发入口之后，否则保存不到原件）；
+   - `viogpudo.vcxproj`：删全部 8 处 wdfldr/wdfdriverentry 库引用 +
+     WDF include 路径，加 `vglctl.cpp` 编译项（WppEnabled 保留，
+     vglctl.tmh 由 WPP 自动生成，模式照抄 driver.cpp）。
+7. **WPP 抓日志能力确认**：release 构建下 DbgPrint 编译为 WPP ETW
+   事件，trace.h 控制 GUID `{D6B96B2C-72BF-4CA5-BB89-9FCA5C82F020}`
+   → 动态测试时用 logman/traceview 抓驱动日志，无需双机 WinDbg。
+
+**发现与教训**
+
+- **KMDOD ≠ KMDF 可用**：DxgkInitializeDisplayOnlyDriver 不绑定
+  WdfFunctions 表；任何 Wdf* 调用都会跳零值表崩溃。这是启动死机
+  根因，W6 的"WDM 驱动手动链 KMDF 库"路线整体作废。
+- **判别 KMDF 驱动的硬标准**：看导入表是否有 WDFLDR.SYS，比读代码
+  快且准。自写 PE 导入表解析器（DataDirectory[1]→section RVA→
+  文件偏移）约 40 行 PowerShell，值得存为工具。
+- **双参数 DbgPrint(LEVEL, (MSG))** 是 trace.h 的重定义宏（DBG 走
+  KdPrint，release 走 WPP）。新 cpp 必须配 `#if !DBG
+  #include "xxx.tmh" #endif`，否则原生 DbgPrint 把 LEVEL 整数当
+  格式串指针 → 4 号地址解引用崩溃。vglctl.cpp 已按 driver.cpp
+  模式处理。但最彻底的做法是 vglctl.cpp 的日志直接复用 WPP 宏。
+
+  （注：vglctl.cpp include 的是 driver.h→helper.h→ntddk.h 路线，
+  TRACE_LEVEL_* 由 trace.h/evntrace 提供，tmh 由 MSBuild 生成。）
+- **死循环止损**：PE checksum 在 demand-start 内核驱动上从不校验
+  （官方驱动带占位值到处跑）；识别伪问题的关键动作是拿**官方签名
+  驱动做算法对照组**，而不是继续换算法。
+- **误操作清空文件**：viogpudo.cpp 被 multiedit 清空过一次（21KB→3
+  行），git checkout -- 恢复后逐个重放修改。教训：大文件多编辑
+  用 multiedit 后必须立刻抽查文件行数/末尾内容再放心。
+
+**测试过程完整记录（换卡重启后）**
+
+- 官方驱动启动成功（2026-10-14 23:20 开机，稳定 17 分钟+）；
+- 备查清单：QXL phantom / virtio-gpu CM_PROB_DISABLED /
+  VioGpuDod 服务 Stopped(Manual) / System32 sys=107528B WHCP 签名 /
+  testsigning=Yes nointegritychecks=Yes isolatedcontext=No；
+- 测试驱动（M1a-v1，KMDF 版）**不再部署**——根因已明，直接等
+  M1a-v2 构建物。
+- 待办：M1a-v2 CI 产物落地后 `Enable-PnpDevice` 动态测试，
+  logman 开 WPP session 同步抓日志。
+
+**下一步**
+
+- [ ] M1a-v2：REST API 推送 + workflow_dispatch 构建（W5 流程复用）
+- [ ] 下载 artifact → inf2cat 重建 cat → 签名 → 部署 → Enable 设备
+      动态验证 `\\.\VGLVIDEO0` + GET_INFO（WPP 抓日志）
+- [ ] M1b：VirtIOLib 数据面（virtqueue/MSI-X/MDL PIN）接线 SUBMIT/
+      REAP/WAIT/PIN/UNPIN
+- [ ] L1 起跑：libvgl 在 VM 上编译 + transport 无设备路径探测
 

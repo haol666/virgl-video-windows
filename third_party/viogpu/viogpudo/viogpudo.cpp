@@ -44,7 +44,7 @@ static UINT g_InstanceId = 0;
 PAGED_CODE_SEG_BEGIN
 VioGpuDod::VioGpuDod(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     : m_pPhysicalDevice(pPhysicalDeviceObject), m_MonitorPowerState(PowerDeviceD0), m_AdapterPowerState(PowerDeviceD0),
-      m_pHWDevice(NULL), m_VglQueue(WDF_NO_HANDLE)
+      m_pHWDevice(NULL)
 {
     PAGED_CODE();
 
@@ -64,6 +64,8 @@ VioGpuDod::~VioGpuDod(void)
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s 0x%p\n", __FUNCTION__, m_pHWDevice));
+    // VGL control device safety net - StopDevice normally does this.
+    VglControlDeviceDestroy();
     delete m_pHWDevice;
     m_pHWDevice = NULL;
 }
@@ -168,45 +170,15 @@ NTSTATUS VioGpuDod::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
         return Status;
     }
 
-    // Create VGL video bridge IOCTL queue on the display WDFDEVICE.
-    // Shares VirtIODevice/CtrlQueue state with the display path; M1a returns
-    // STATUS_NOT_IMPLEMENTED for SUBMIT/REAP/WAIT/PIN/UNPIN.
+    // VGL video bridge (M1a-v2, WDM control device): expose \\.\VGLVIDEO0
+    // for libvgl.  Plain WDM only - KMDOD cannot use KMDF (W8 root cause:
+    // the WdfFunctions table is never bound; see vglctl.cpp header).
+    // Failure is non-fatal: display keeps working without the bridge.
     {
-        WDFDEVICE wdfDevice = reinterpret_cast<WDFDEVICE>(m_DxgkInterface.DeviceHandle);
-
-        WDF_OBJECT_ATTRIBUTES vglAttrs;
-        WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&vglAttrs, VIOGPU_VGL_QUEUE_CONTEXT);
-        vglAttrs.ParentObject = wdfDevice;
-
-        WDF_IO_QUEUE_CONFIG vglQueueConfig;
-        WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&vglQueueConfig, WdfIoQueueDispatchSequential);
-        vglQueueConfig.EvtIoDeviceControl = VglIoDeviceControl;
-
-        NTSTATUS vglStatus = WdfIoQueueCreate(wdfDevice,
-                                               &vglQueueConfig,
-                                               &vglAttrs,
-                                               &m_VglQueue);
-        if (NT_SUCCESS(vglStatus)) {
-            DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL IOCTL queue created on display device\n"));
-            PVIOGPU_VGL_QUEUE_CONTEXT ctx = reinterpret_cast<PVIOGPU_VGL_QUEUE_CONTEXT>(
-                WdfObjectGetTypedContext(m_VglQueue, VIOGPU_VGL_QUEUE_CONTEXT));
-            if (ctx) {
-                ctx->pDod = this;
-            }
-            // Also expose \\DosDevices\\VGLVIDEO0 so libvgl's
-            // CreateFile("\\\\.\\VGLVIDEO0") can open this device.
-            {
-                DECLARE_CONST_UNICODE_STRING(vglDosName, L"\\DosDevices\\VGLVIDEO0");
-                NTSTATUS symStatus = WdfDeviceCreateSymbolicLink(wdfDevice, &vglDosName);
-                if (NT_SUCCESS(symStatus)) {
-                    DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL symbolic link \\DosDevices\\VGLVIDEO0 created\n"));
-                } else {
-                    DbgPrint(TRACE_LEVEL_WARNING, ("VGL symbolic link create failed: 0x%X\n", symStatus));
-                }
-            }
-        } else {
-            DbgPrint(TRACE_LEVEL_WARNING, ("VGL IOCTL queue create failed: 0x%X\n", vglStatus));
-            m_VglQueue = WDF_NO_HANDLE;
+        NTSTATUS vglStatus = VglControlDeviceCreate(m_pHWDevice ? m_pHWDevice->IsMSIEnabled() : FALSE);
+        if (!NT_SUCCESS(vglStatus))
+        {
+            DbgPrint(TRACE_LEVEL_WARNING, ("VGL control device create failed: 0x%X (display continues)\n", vglStatus));
         }
     }
 
@@ -283,6 +255,8 @@ NTSTATUS VioGpuDod::StopDevice(VOID)
     PAGED_CODE();
 
     m_Flags.DriverStarted = FALSE;
+    // Tear down the VGL control device while hardware state is still ours.
+    VglControlDeviceDestroy();
     return STATUS_SUCCESS;
 }
 
@@ -4135,83 +4109,7 @@ PDXGKRNL_INTERFACE VioGpuAdapter::GetDxgkInterface()
     return m_pVioGpuDod->GetDxgkInterface();
 }
 
-// VGL video bridge IOCTL dispatch (M1a skeleton).
-//
-// Registered on a custom WDFQUEUE attached to the display WDFDEVICE.
-// M1a: GET_INFO fills transport info; SUBMIT/REAP/WAIT/PIN/UNPIN return
-// STATUS_NOT_IMPLEMENTED (M1b wires VirtIOLib + virtqueue).
-//
-// METHOD_BUFFERED: WDF maps the buffer for the current thread (PASSIVE_LEVEL),
-// so WdfRequestRetrieveOutputBuffer safely gives us the user buffer.
-VOID VglIoDeviceControl(_In_ WDFQUEUE Queue,
-                        _In_ WDFREQUEST Request,
-                        _In_ size_t OutputBufferLength,
-                        _In_ size_t InputBufferLength,
-                        _In_ ULONG IoControlCode)
-{
-    UNREFERENCED_PARAMETER(Queue);
-    UNREFERENCED_PARAMETER(InputBufferLength);
+// VGL video bridge IOCTL handling lives in vglctl.cpp (WDM control device,
+// M1a-v2).  The KMDF-based VglIoDeviceControl was removed after the W8 root
+// cause analysis - see vglctl.cpp header comment for the evidence trail.
 
-    PVIOGPU_VGL_QUEUE_CONTEXT ctx = reinterpret_cast<PVIOGPU_VGL_QUEUE_CONTEXT>(
-        WdfObjectGetTypedContext(WdfRequestGetIoQueue(Request), VIOGPU_VGL_QUEUE_CONTEXT));
-    VioGpuDod *pDod = ctx ? ctx->pDod : nullptr;
-
-    if (!pDod) {
-        WdfRequestCompleteWithInformation(Request, STATUS_INVALID_DEVICE_REQUEST, 0);
-        return;
-    }
-
-    NTSTATUS status = STATUS_SUCCESS;
-
-    switch (IoControlCode) {
-
-    case IOCTL_VGL_GET_INFO: {
-        if (OutputBufferLength < sizeof(vgl_tport_info_t)) {
-            WdfRequestCompleteWithInformation(Request, STATUS_BUFFER_TOO_SMALL,
-                                              sizeof(vgl_tport_info_t));
-            return;
-        }
-        PVOID buffer;
-        size_t bufLen;
-        NTSTATUS getStatus = WdfRequestRetrieveOutputBuffer(Request,
-                                                           sizeof(vgl_tport_info_t),
-                                                           &buffer, &bufLen);
-        if (!NT_SUCCESS(getStatus)) {
-            status = getStatus;
-            break;
-        }
-        // M1a: bridge present, datapath (VirtIOLib) lands in M1b.
-        vgl_tport_info_t info;
-        RtlZeroMemory(&info, sizeof(info));
-        info.magic = 'V' | ('G' << 8) | ('V' << 16) | ('1' << 24);
-        info.virtio_version = 1;
-        info.control_queue_depth = 64;
-        info.notify_cap = 0;
-        // MSI-X status from the PCI resources (VioGpuAdapter)
-        if (pDod->GetHWDevice()) {
-            info.msix_enabled = (ULONG)pDod->GetHWDevice()->GetPciResources()->IsMSIEnabled();
-        } else {
-            info.msix_enabled = 0;
-        }
-        RtlCopyMemory(buffer, &info, sizeof(info));
-        WdfRequestCompleteWithInformation(Request, STATUS_SUCCESS, sizeof(info));
-        return;
-    }
-
-    case IOCTL_VGL_SUBMIT:
-    case IOCTL_VGL_REAP:
-    case IOCTL_VGL_WAIT:
-    case IOCTL_VGL_PIN:
-    case IOCTL_VGL_UNPIN:
-        // M1b (VirtIOLib + virtqueue) fills these in.
-        WdfRequestCompleteWithInformation(Request, STATUS_NOT_IMPLEMENTED, 0);
-        return;
-
-    default:
-        WdfRequestCompleteWithInformation(Request,
-                                          STATUS_INVALID_DEVICE_REQUEST, 0);
-        return;
-    }
-
-    WdfRequestCompleteWithInformation(Request, status, 0);
-}

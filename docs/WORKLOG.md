@@ -621,3 +621,56 @@ viogpudo 为 KMDF 驱动但 `DriverType=WDM` → 触发本轮两个隐藏构建�
       验证（预期不再死机）
 - [ ] 若 v3 仍挂：WinDbg KDNET 双机 + 手动 break 看挂死栈
 - [ ] M1b：VirtIOLib 数据面接线（SUBMIT/REAP/WAIT/PIN/UNPIN）
+---
+
+## W10 · 2026-10-15 · M1a-v3 部署成功：VGLVIDEO0 全链路验证通过
+
+**做了什么**
+
+1. **v3 CI 两轮修复后构建成功**（run 38601817254, commit 22aff3c）：
+   - fix1: IoCreateDriver 在 WDK 10.0.28000 头文件中被移除声明
+     （ntoskrnl.lib 里符号仍在——lib dump 验证 IoCreateDriver +
+     __imp_IoCreateDriver 都在）→ 本地补原型；
+   - fix2: C++ 编译单元里原声明被 mangling（?IoCreateDriver@@YAJ...）
+     → extern "C" NTKERNELAPI 修复 LNK2019。
+2. **v3 部署**（staging 107520B + inf2cat 0 错 + 自签 cat）：
+   pnputil /install 直接生效为 oem16.inf，自动换装 System32\drivers
+   的 sys（设备处于禁用态时无文件锁问题），Enable 设备 → OK/None、
+   服务 Running、系统稳定。
+3. **决定性测试通过（零死机）**：
+   - CreateFile(\\\\.\\VGLVIDEO0) 成功（v2 两次硬挂死的同一路径）；
+   - DeviceIoControl(IOCTL_VGL_GET_INFO) 返回 32B；
+   - magic='VGV1'/virtio_version=1/queue_depth=64 全部正确；
+   - msix_enabled=0（M1b 接 VirtIOLib 后复核真实值）。
+4. **用户态测试脚本三处 bug 修复**（一路踩过来）：
+   - GENERIC_READ|WRITE 相或正负号溢出 → uint32 字面量 3221225472；
+   - 路径过度转义 \\\\\\\\.\\\\ → \\\\.；
+   - **IOCTL 手算值错误**：0x240000 → 实为 **0x220000**。根因：
+     CTL_CODE 的 function 字段撞位——0x22 的 bit1<<16=bit21 和
+     0x8000 的 bit15<<2=bit17 起看似没问题，但 0x8000 超出 12-bit
+     function 字段（0-0xFFF），与 DeviceType 位重叠 OR 后丢失。
+     用户态必须与内核用同一个 vgl_transport.h 的宏，不能手算。
+5. **当前在机状态**：oem16.inf (v3) 生效（ Owners 还有旧 oem12/14
+   残留条目但以 oem16 为准），设备 OK，服务 Running。
+
+**发现与教训**
+
+- **CTL_CODE 绝不能手算**：function 字段 12-bit（0x800-0xFFF 为
+  私有区），超范围会与 DeviceType 位重叠。用户态/内核态共用
+  vgl_transport.h 才是唯一正解（设计如此，是测试脚本违规手算）。
+- **Win32 error 1 ≠ 一定是 STATUS_INVALID_DEVICE_REQUEST**：
+  STATUS_NOT_IMPLEMENTED 也映射 ERROR_INVALID_FUNCTION。本次实际
+  是 IOCTL 编号不匹配落入 default 分支。
+- **IoCreateDriver 仍存活**：新 WDK 头文件删声明但 ntoskrnl.lib
+  一直导出（lib dump 验证法），extern "C" 本地声明即可用。
+- **C++ 内核驱动的任何外部函数原型都要 extern "C"**：否则
+  mangling 后链接器找不到符号（LNK2019 的符号名直接揭示）。
+- **设备禁用态换驱动文件无锁**：pnputil /install 在设备 CM_PROB_
+  DISABLED 时顺利完成 sys 复制（对比运行态被 vgvdo 占用时锁文件）。
+
+**下一步**
+
+- [ ] M1b：VirtIOLib 数据面接线（SUBMIT/REAP/WAIT/PIN/UNPIN +
+      msix_enabled 真实值）
+- [ ] 清理 DriverStore 中 oem12/14 旧包（保留 oem16 v3 只版本）
+- [ ] L1 起跑：libvgl 在 VM 上编译 + transport 无设备路径探测

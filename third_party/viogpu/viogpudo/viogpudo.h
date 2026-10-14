@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <wdf.h>
 #include "viogpu.h"
 #include "viogpu_queue.h"
 

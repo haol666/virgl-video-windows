@@ -19,7 +19,10 @@ jobs:
           Invoke-WebRequest -Uri https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile _nuget.exe
           $nuget = "$PWD\_nuget.exe"
         }
-        & $nuget install Microsoft.WindowsDriverKit -OutputDirectory packages -Version 10.0.28000.1834 -NonInteractive
+        $src = "https://api.nuget.org/v3/index.json"
+        & $nuget install Microsoft.Windows.SDK.CPP -OutputDirectory packages -Version 10.0.28000.2526 -NonInteractive -Source $src
+        & $nuget install Microsoft.Windows.SDK.CPP.x64 -OutputDirectory packages -Version 10.0.28000.2526 -NonInteractive -Source $src
+        & $nuget install Microsoft.Windows.WDK.x64 -OutputDirectory packages -Version 10.0.28000.2526 -NonInteractive -Source $src
         if ($LASTEXITCODE -ne 0) { throw "nuget restore failed" }
         "restored packages:"; (Get-ChildItem packages).Name
 

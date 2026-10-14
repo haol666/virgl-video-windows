@@ -12,14 +12,14 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Restore WDK/SDK NuGet packages (VS2026-compatible WDK, shared with vgvdo)
+    - name: Restore WDK NuGet packages (stampinf.exe for viogpu INF processing)
       run: |
         $nuget = (Get-Command nuget.exe -ErrorAction SilentlyContinue).Source
         if (-not $nuget) {
           Invoke-WebRequest -Uri https://dist.nuget.org/win-x86-commandline/latest/nuget.exe -OutFile _nuget.exe
           $nuget = "$PWD\_nuget.exe"
         }
-        & $nuget restore driver\packages.config -PackagesDirectory packages -NonInteractive
+        & $nuget install Microsoft.WindowsDriverKit -OutputDirectory packages -Version 10.0.28000.1834 -NonInteractive
         if ($LASTEXITCODE -ne 0) { throw "nuget restore failed" }
         "restored packages:"; (Get-ChildItem packages).Name
 
@@ -66,7 +66,7 @@ jobs:
         name: viogpudo-baseline-x64
         path: |
           third_party/viogpu/build/viogpudo.sys
-          third_party/viogpu/build/viogpudo.inf
+          third_party/viogpu/build/viogpudo.inx
           third_party/viogpu/build/viogpudo.pdb
           third_party/viogpu/build/viogpuap.exe
           third_party/viogpu/build/viogpures.exe

@@ -419,6 +419,7 @@ class VioGpuDod
 // after HWInit; IOCTLs are handled by the dispatch entries hooked in
 // DriverEntry (VglAttachToDriverObject).  GET_INFO serves transport info;
 // SUBMIT/REAP/WAIT/PIN/UNPIN return STATUS_NOT_IMPLEMENTED until M1b.
-VOID VglAttachToDriverObject(_In_ PDRIVER_OBJECT pDriverObject);
+NTSTATUS VglInit(VOID);
+VOID VglUpdateCaps(_In_ BOOLEAN MsixEnabled);
 NTSTATUS VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled);
 VOID VglControlDeviceDestroy(VOID);

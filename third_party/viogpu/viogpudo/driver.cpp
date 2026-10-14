@@ -117,11 +117,10 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     }
     else
     {
-        // VGL bridge (M1a-v2): hook IRP_MJ_CREATE/CLOSE/DEVICE_CONTROL only
-        // AFTER dxgkrnl has installed its own entries, so the originals can
-        // be saved and forwarded for IRPs that do not target our CDO.
-        // Must happen before any device start can create \Device\VGLVIDEO0.
-        VglAttachToDriverObject(pDriverObject);
+        // VGL bridge (M1a-v3): create an ISOLATED driver object for the
+        // control device.  dxgkrnl's dispatch table is never touched
+        // (W9 deadlock root cause: hooking it broke the display path).
+        VglInit();
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));

@@ -172,15 +172,17 @@ NTSTATUS VioGpuDod::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
     // Shares VirtIODevice/CtrlQueue state with the display path; M1a returns
     // STATUS_NOT_IMPLEMENTED for SUBMIT/REAP/WAIT/PIN/UNPIN.
     {
+        WDFDEVICE wdfDevice = reinterpret_cast<WDFDEVICE>(m_DxgkInterface.DeviceHandle);
+
         WDF_OBJECT_ATTRIBUTES vglAttrs;
         WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&vglAttrs, VIOGPU_VGL_QUEUE_CONTEXT);
-        vglAttrs.ParentObject = m_DxgkInterface.DeviceHandle;
+        vglAttrs.ParentObject = wdfDevice;
 
         WDF_IO_QUEUE_CONFIG vglQueueConfig;
         WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&vglQueueConfig, WdfIoQueueDispatchSequential);
         vglQueueConfig.EvtIoDeviceControl = VglIoDeviceControl;
 
-        NTSTATUS vglStatus = WdfIoQueueCreate(m_DxgkInterface.DeviceHandle,
+        NTSTATUS vglStatus = WdfIoQueueCreate(wdfDevice,
                                                &vglQueueConfig,
                                                &vglAttrs,
                                                &m_VglQueue);
@@ -195,7 +197,7 @@ NTSTATUS VioGpuDod::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
             // CreateFile("\\\\.\\VGLVIDEO0") can open this device.
             {
                 DECLARE_CONST_UNICODE_STRING(vglDosName, L"\\DosDevices\\VGLVIDEO0");
-                NTSTATUS symStatus = WdfDeviceCreateSymbolicLink(m_DxgkInterface.DeviceHandle, &vglDosName);
+                NTSTATUS symStatus = WdfDeviceCreateSymbolicLink(wdfDevice, &vglDosName);
                 if (NT_SUCCESS(symStatus)) {
                     DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL symbolic link \\DosDevices\\VGLVIDEO0 created\n"));
                 } else {
@@ -4159,6 +4161,8 @@ VOID VglIoDeviceControl(_In_ WDFQUEUE Queue,
         return;
     }
 
+    NTSTATUS status = STATUS_SUCCESS;
+
     switch (IoControlCode) {
 
     case IOCTL_VGL_GET_INFO: {
@@ -4169,10 +4173,11 @@ VOID VglIoDeviceControl(_In_ WDFQUEUE Queue,
         }
         PVOID buffer;
         size_t bufLen;
-        NTSTATUS status = WdfRequestRetrieveOutputBuffer(Request,
-                                                         sizeof(vgl_tport_info_t),
-                                                         &buffer, &bufLen);
-        if (!NT_SUCCESS(status)) {
+        NTSTATUS getStatus = WdfRequestRetrieveOutputBuffer(Request,
+                                                           sizeof(vgl_tport_info_t),
+                                                           &buffer, &bufLen);
+        if (!NT_SUCCESS(getStatus)) {
+            status = getStatus;
             break;
         }
         // M1a: bridge present, datapath (VirtIOLib) lands in M1b.
@@ -4183,8 +4188,8 @@ VOID VglIoDeviceControl(_In_ WDFQUEUE Queue,
         info.control_queue_depth = 64;
         info.notify_cap = 0;
         // MSI-X status from the PCI resources (VioGpuAdapter)
-        if (pDod->m_pHWDevice) {
-            info.msix_enabled = (ULONG)pDod->m_pHWDevice->GetPciResources()->IsMSIEnabled();
+        if (pDod->GetHWDevice()) {
+            info.msix_enabled = (ULONG)pDod->GetHWDevice()->GetPciResources()->IsMSIEnabled();
         } else {
             info.msix_enabled = 0;
         }

@@ -385,6 +385,11 @@ class VioGpuDod
         return &m_DxgkInterface;
     }
 
+    VioGpuAdapter* GetHWDevice()
+    {
+        return m_pHWDevice;
+    }
+
   private:
     BOOLEAN CheckHardware();
     NTSTATUS WriteRegistryString(_In_ HANDLE DevInstRegKeyHandle, _In_ PCWSTR pszwValueName, _In_ PCSTR pszValue);
@@ -413,6 +418,12 @@ class VioGpuDod
 typedef struct _VIOGPU_VGL_QUEUE_CONTEXT {
     VioGpuDod *pDod;
 } VIOGPU_VGL_QUEUE_CONTEXT, *PVIOGPU_VGL_QUEUE_CONTEXT;
+
+// Register the context type with KMDF so WdfObjectGetTypedContext/WdfObjectAllocateContext
+// can allocate and retrieve VIOGPU_VGL_QUEUE_CONTEXT blocks. Required because
+// viogpudo uses DriverType=WDM (not KMDF), so the framework does not auto-register
+// context types for WDM drivers.
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VIOGPU_VGL_QUEUE_CONTEXT, VglGetContext)
 
 // VGL video bridge IOCTL dispatch callback (registered on a custom WDFQUEUE
 // attached to the display WDFDEVICE). Forwarded to VioGpuAdapter state for

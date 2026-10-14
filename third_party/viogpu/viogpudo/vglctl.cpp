@@ -43,6 +43,16 @@
 #include "vglctl.tmh"
 #endif
 
+// IoCreateDriver: exported by ntoskrnl.lib since forever (verified present
+// in this WDK's ntoskrnl.lib), but the 10.0.28000 headers dropped the
+// declaration.  Declare it locally (public ABI, stable since XP).
+NTKERNELAPI
+NTSTATUS
+IoCreateDriver(
+    _In_opt_ PUNICODE_STRING DriverName,
+    _In_ PDRIVER_INITIALIZE InitializationFunction
+    );
+
 namespace
 {
 

@@ -204,7 +204,6 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
     {
         vgl_tport_reap_t *pReap = (vgl_tport_reap_t *)Irp->AssociatedIrp.SystemBuffer;
         ULONG inLen = ioStack->Parameters.DeviceIoControl.InputBufferLength;
-        ULONG outLen = ioStack->Parameters.DeviceIoControl.OutputBufferLength;
 
         if (!g_pVglCtrlQueue) {
             status = STATUS_INVALID_DEVICE_REQUEST;

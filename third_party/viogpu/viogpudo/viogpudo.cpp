@@ -3848,6 +3848,12 @@ VOID VioGpuAdapter::DpcRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface)
                 PGPU_CTRL_HDR pcmd = (PGPU_CTRL_HDR)pvbuf->buf;
                 PGPU_CTRL_HDR resp = (PGPU_CTRL_HDR)pvbuf->resp_buf;
 
+                // R2 DEBUG: 确认 resp_buf 是否正确映射（应为我们 512B ExAlloc 缓冲）
+                DbgPrint(TRACE_LEVEL_INFORMATION,
+                         ("VGL DPC: pvbuf=%p resp_buf=%p auto_release=%d complete_cb=%p type=%lu\n",
+                          pvbuf, resp, pvbuf->auto_release, pvbuf->complete_cb,
+                          resp ? resp->type : 0xFFFFFFFF));
+
                 if (resp->type >= VIRTIO_GPU_RESP_ERR_UNSPEC)
                 {
                     DbgPrint(TRACE_LEVEL_FATAL, ("!!!!! Command failed %d", resp->type));

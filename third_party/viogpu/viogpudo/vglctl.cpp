@@ -79,6 +79,9 @@ volatile LONG g_VglDoneFlag = 0;             // set by DPC complete_cb
 VOID VglCompleteCB(_In_opt_ PVOID ctx)
 {
     UNREFERENCED_PARAMETER(ctx);
+    // R1 DEBUG: 确认 DPC 链路是否触发
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("VGL VglCompleteCB: DPC fired, token=%lu\n", g_VglOutstandingToken));
     InterlockedExchange(&g_VglDoneFlag, 1);
 }
 
@@ -244,6 +247,11 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         // Enqueue to virtqueue (acquires m_SpinLock internally, kicks).
         g_pVglCtrlQueue->QueueBuffer(vbuf);
 
+        // R1 DEBUG: 确认 SUBMIT 路径是否正常入队
+        DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("VGL SUBMIT: token=%lu cmdLen=%lu vbuf=%p queue_kick\n",
+                  token, cmdLen, vbuf));
+
         // Assign token for REAP to pick up.
         ULONG token = InterlockedIncrement(&g_VglNextToken);
         pSubmit->token = token;
@@ -320,6 +328,10 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         }
 
         if (vbuf) {
+            // R1 DEBUG: DPC 已触发，响应已 DMA 到我们的 512B 缓冲
+            DbgPrint(TRACE_LEVEL_INFORMATION,
+                     ("VGL REAP: token=%lu MATCHED, has_data=1, resp=%p\n",
+                      token, respBuf));
             // done: DPC ran complete_cb; response DMA'd into OUR buffer.
             // Copy out, then release vbuf (ours now) and free the buffer.
             ULONG copyLen = (ULONG)min((UINT)512, cap);
@@ -335,6 +347,13 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
             ExFreePool(respBuf);
             status = STATUS_SUCCESS;
         } else {
+            // R1 DEBUG: DPC 未触发或 token 不匹配
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("VGL REAP: token=%lu NO_MATCH (vbuf=%p doneFlag=%ld outstandingToken=%lu)\n",
+                      token,
+                      g_pVglOutstandingVbuf,
+                      g_VglDoneFlag,
+                      g_VglOutstandingToken));
             pReap->has_data = 0;
             pReap->status = 0;
             Irp->IoStatus.Information = sizeof(vgl_tport_reap_t);

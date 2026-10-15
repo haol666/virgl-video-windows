@@ -421,5 +421,5 @@ class VioGpuDod
 // SUBMIT/REAP/WAIT/PIN/UNPIN return STATUS_NOT_IMPLEMENTED until M1b.
 NTSTATUS VglInit(VOID);
 VOID VglUpdateCaps(_In_ BOOLEAN MsixEnabled);
-NTSTATUS VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled);
+NTSTATUS VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled, _In_opt_ CtrlQueue *pCtrlQueue);
 VOID VglControlDeviceDestroy(VOID);

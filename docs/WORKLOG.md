@@ -674,3 +674,39 @@ viogpudo 为 KMDF 驱动但 `DriverType=WDM` → 触发本轮两个隐藏构建�
       msix_enabled 真实值）
 - [ ] 清理 DriverStore 中 oem12/14 旧包（保留 oem16 v3 只版本）
 - [ ] L1 起跑：libvgl 在 VM 上编译 + transport 无设备路径探测
+
+---
+
+## W11 (2026-10-15 下午) — M1b-p0: SUBMIT/REAP 实现 + double-free 修复
+
+**目标**：在 vglctl.cpp 实现 SUBMIT/REAP/WAIT 三个 IOCTL，打通内核驱动到宿主的 virtio-gpu 控制命令通路。
+
+### 过程
+
+1. 读取 viogpudo.h/cpp 确认 VglControlDeviceCreate 注入点（:178）和签名
+2. 读取 viogpu_queue.h/cpp 确认 CtrlQueue::QueueBuffer/DequeueBuffer/AllocCmdResp/ReleaseBuffer 语义
+3. 读取 viogpu.h 确认 virtio-gpu 协议常量（命令类型、响应类型、GPU_CTRL_HDR/GPU_DISP_ONE 结构体）
+4. 重写 vglctl.cpp：
+   - 全局状态：g_pVglCtrlQueue、g_VglTokenLock、g_VglNextToken、g_VglOutstandingToken、g_pVglOutstandingVbuf
+   - VglDriverEntry 加 KeInitializeSpinLock
+   - VglControlDeviceCreate 存储 queue 指针
+   - SUBMIT：AllocCmdResp + QueueBuffer + token 表同步
+   - REAP：轮询 outstanding vbuf + ReleaseBuffer
+   - WAIT：KeDelayExecutionThread 轮询
+   - PIN/UNPIN：保持 NOT_IMPLEMENTED
+5. 冒烟测试脚本 test_vgl_m1bp0.ps1（旧版有 bug，结构混乱，重写为纯 byte[] 操作）
+6. **发现 double-free bug**：DPC (viogpudo.cpp:3870-3872) 在 auto_release=TRUE 时调用 ReleaseBuffer，REAP 也调用 ReleaseBuffer → double-free。修复：REAP 不再调用 ReleaseBuffer。
+7. **发现响应读取竞态**：单处理器上 DPC 先于 REAP 执行完毕（ReleaseBuffer 后 resp_buf=NULL），REAP 读不到响应。MAX_INLINE_RESP_SIZE=24，GET_DISPLAY_INFO 响应 408 字节（动态分配）。
+
+### 发现与教训
+
+- **DPC 与 REAP 共享 vbuf 生命周期**：显示路径 DPC 在 auto_release=TRUE 时调用 ReleaseBuffer；REAP 也调用 → double-free。修复：REAP 不调用 ReleaseBuffer。但代价：单处理器上 DPC 先于 REAP 执行完毕，ReleaseBuffer 后 resp_buf=NULL，REAP 读不到响应。
+- **MAX_INLINE_RESP_SIZE=24**：virtio-gpu 缓冲池内联响应上限仅 24 字节。>24 字节响应均为动态分配，ReleaseBuffer 后 resp_buf=NULL。这意味着所有有意义的控制命令响应（GET_DISPLAY_INFO=408B, GET_CAPSET=动态）都无法在 REAP 中读取。
+- **单处理器 IRQL 模型**：DPC（DISPATCH_LEVEL）在 IOCTL（PASSIVE_LEVEL）之前执行。SUBMIT 的 Kick 触发 ISR→DPC，DPC 处理并释放 vbuf 后，REAP 才运行。响应数据在 DPC 释放后丢失。
+- **auto_release=FALSE 方案不可行**：若设 auto_release=FALSE 让 REAP 管理生命周期，DPC 调用 DequeueBuffer（从缓冲池取缓冲）后不释放 → 缓冲池泄漏。每次命令泄漏一个 VBUFFER_SIZE 缓冲。
+
+### 下一步
+
+- [ ] M1b-p1：解决响应读取竞态（候选：独立 VirtIODevice / DPC 回调 / 修改 DPC 不释放 VGL 缓冲）
+- [ ] 构建 CI → 部署到 VM → 跑 test_vgl_m1bp0.ps1 验证不崩溃
+- [ ] 更新 HANDOFF.md §7（已完成）和 WORKLOG.md（本条）

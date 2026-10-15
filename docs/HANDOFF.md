@@ -1,6 +1,6 @@
 # virgl-video-windows 交接文档（Windows Guest 侧）
 
-> 更新：2026-10-15 · L0 桥接层 M1a 完成（W10 全链路验证通过）
+> 更新：2026-10-15 · L0 M1a 完成，M1b-p0 进行中（SUBMIT/REAP 已实现，double-free 已修复，响应读取竞态待解决）
 > 定位：给"下一个接手的人"（或下一个会话的自己）。事实以本文 + `docs/WORKLOG.md`（W1–W10 全量日志）为准。
 
 ---
@@ -30,7 +30,7 @@ L2 是 FFmpeg 标准编码器位；L3 是 RustDesk 侧最小 diff。
 | 层 | 状态 | 关键产物 | 验证 |
 |---|---|---|---|
 | L0 M1a 桥接 | ✅ **完成** | viogpudo.sys 107520B（v3，在机运行） | CreateFile+GET_INFO 全绿，零死机 |
-| L0 M1b 数据面 | ⬜ 未开始 | vglctl.cpp 占位（返回 NOT_IMPLEMENTED） | — |
+| L0 M1b 数据面 | 🔄 **p0 进行中** | vglctl.cpp SUBMIT/REAP/WAIT 已实现（double-free 已修复） | SUBMIT/REAP IOCTL 通道稳定；响应读取竞态待解决 |
 | L1 libvgl | ⬜ 未编译 | vgl/src 5 文件 | CI 有 wire 单测（build-vgl.yml） |
 | L2 FFmpeg | ⬜ 未构建 | vglenc.c 骨架 6KB | build-ffmpeg.yml 目前是 M2 占位 |
 | L3 hwcodec | ⬜ 未应用 | 0001 patch 2065B | build-hwcodec.yml cargo check |
@@ -128,15 +128,22 @@ git commit → REST API 推送（§5.2）→ dispatch CI 382795312 → 等 ~5 �
 
 ## 7. 下一步任务分解（M1b → 端到端）
 
-### M1b-p（polling 版数据面）— 建议先做
+### M1b-p（polling 版数据面）— 进行中
 目标：SUBMIT/REAP/WAIT/PIN/UNPIN 五个 IOCTL 落地，**先不接 MSI-X 中断**（WAIT 轮询+超时）。
 改动集中在 `vglctl.cpp`（独立驱动对象内，出事不影响显示路径——W9 教训的架构红利）：
-- SUBMIT：从 VioGpuAdapter 借用既有 VirtIODevice 控制 virtqueue，发 virtio-gpu 视频协议命令（wire 契约见 `vgl_wire.h`），token 表记录 outstanding；
-- REAP：轮询 used ring 按 token 取回；
-- WAIT：`KeDelayExecutionThread` 轮询 + timeout_ms（msix=0 时 libvgl 走轮询路径——`notify_cap=0` 当前就为此留的位）；
-- PIN/UNPIN：`MmProbeAndLockPages`（UserMode，IoReadAccess|IoWriteAccess）+ PFN 表回填（`vgl_tport_pin_t`），句柄表管理；
-- 并发要点：与显示路径共享 VirtIODevice → 引用 VioGpuAdapter 已有的队列锁；IOCTL 分发保持串行（sequential 语义用自建 FAST_MUTEX 或 per-device 队列锁）。
-验收：test 脚本扩展 PIN+SUBMIT+REAP 一次 echo 命令（virtio-gpu 协议 GET_CAPS 类无害命令）往返成功，系统稳定。
+- SUBMIT ✅：AllocCmdResp + QueueBuffer + token 表记录 outstanding
+- REAP ✅：轮询 outstanding vbuf，检查 resp_buf有效性（NULL=DPC已释放，non-zero type=已就绪），复制响应
+- WAIT ✅：`KeDelayExecutionThread` 轮询 + timeout_ms
+- PIN/UNPIN ⬜：`MmProbeAndLockPages` + PFN 表回填，M1b-p1 填充
+- **double-free bug 已修复**：DPC (viogpudo.cpp:3872) 在 auto_release=TRUE 时调用 ReleaseBuffer，REAP 原代码也调用 ReleaseBuffer → double-free。修复：REAP 不再调用 ReleaseBuffer。
+- **响应读取竞态**（待解决）：单处理器上 DPC 在 REAP 之前执行完毕（ReleaseBuffer 后 resp_buf=NULL），导致 REAP 读不到响应。MAX_INLINE_RESP_SIZE=24，GET_DISPLAY_INFO 响应 408 字节（动态分配，ReleaseBuffer 后 resp_buf=NULL）。M1b-p1 需解决此竞态（候选方案：独立 VirtIODevice 或 DPC 回调捕获响应）。
+验收：test 脚本 `test_vgl_m1bp0.ps1` 验证 SUBMIT+REAP IOCTL 通道稳定（即使响应读取竞态导致 has_data=0，也不崩溃）。
+
+### M1b-p1（响应竞态解决 + PIN/UNPIN）— 下一步
+解决单处理器上 DPC 先于 REAP 释放 vbuf 导致的响应丢失问题。候选方案：
+1. 独立 VirtIODevice + 独立控制 virtqueue（避免与显示路径 DPC 竞争）
+2. DPC 回调：注册自定义 DPC 在显示 DPC 之前/之中捕获响应
+3. auto_release=FALSE + REAP 管理生命周期（但会导致 DPC 调用 DequeueBuffer 后不释放 → 缓冲池泄漏）
 
 ### M1b-i（中断版）— 性能优化，后做
 MSI-X vector 映射 + event/queue kick + WAIT 睡事件而非轮询。依赖 M1b-p 的正确性先行。

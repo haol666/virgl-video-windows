@@ -28,8 +28,8 @@
  *   - VglUpdateCaps / VglControlDeviceCreate(msix): StartDevice refreshes
  *     cached caps; the device exists for the whole driver lifetime, which
  *     also removes every create/destroy race across PnP restarts.
- *   - GET_INFO serves cached globals; SUBMIT/REAP/WAIT/PIN/UNPIN return
- *     STATUS_NOT_IMPLEMENTED until M1b (VirtIOLib wiring).
+ *   - GET_INFO serves cached globals; SUBMIT/REAP/WAIT implemented (M1b-p0);
+ *     PIN/UNPIN remain STATUS_NOT_IMPLEMENTED (M1b-p1).
  *
  * IRQL notes: no PAGED_CODE() in the dispatchers; everything runs from
  * nonpaged init/static data.  METHOD_BUFFERED needs no DO_BUFFERED_IO flag
@@ -59,6 +59,17 @@ namespace
 
 PDRIVER_OBJECT g_VglDriverObject = NULL;
 volatile LONG g_VglMsixEnabled = 0;
+
+// M1b-p0: cached CtrlQueue pointer injected by viogpudo after HWInit.
+// NULL until VglControlDeviceCreate receives &m_pHWDevice->m_CtrlQueue.
+CtrlQueue *g_pVglCtrlQueue = NULL;
+
+// M1b-p0: token table for SUBMIT→REAP round-trip.  Polling mode (no MSI-X),
+// so a single outstanding entry suffices for the smoke test.
+KSPIN_LOCK g_VglTokenLock;
+ULONG g_VglNextToken = 1;
+ULONG g_VglOutstandingToken = 0;
+PGPU_VBUFFER g_pVglOutstandingVbuf = NULL;   // vbuf ptr for the outstanding command
 
 const WCHAR g_VglNtDeviceName[] = L"\\Device\\VGLVIDEO0";
 const WCHAR g_VglDosDeviceName[] = L"\\DosDevices\\VGLVIDEO0";
@@ -118,11 +129,179 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
     }
 
     case IOCTL_VGL_SUBMIT:
+    {
+        // Input buffer: [command_data (len bytes)][vgl_tport_submit_t]
+        // vgl_tport_submit_t is at the tail; command_data precedes it.
+        vgl_tport_submit_t *pSubmit = (vgl_tport_submit_t *)Irp->AssociatedIrp.SystemBuffer;
+        ULONG inLen = ioStack->Parameters.DeviceIoControl.InputBufferLength;
+
+        if (!g_pVglCtrlQueue) {
+            status = STATUS_NOT_READY;
+            break;
+        }
+        if (inLen < sizeof(vgl_tport_submit_t)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        ULONG cmdLen = pSubmit->len;
+        if (cmdLen == 0 || cmdLen > MAX_INLINE_CMD_SIZE) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (inLen < sizeof(vgl_tport_submit_t) + cmdLen) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        // Allocate response buffer (up to 512 bytes, well beyond any ctrl resp).
+        SIZE_T respSz = 512;
+        PVOID respBuf = ExAllocatePoolUninitialized(NonPagedPoolNx, respSz, 'gLVG');
+        if (!respBuf) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        // AllocCmdResp: gets a vbuffer from the pool with cmd area + resp area.
+        // auto_release=TRUE (set by GetBuf), so DPC will call ReleaseBuffer.
+        // REAP must NOT call ReleaseBuffer — would double-free.
+        PGPU_VBUFFER vbuf;
+        PVOID cmdBuf = g_pVglCtrlQueue->AllocCmdResp(&vbuf, (int)cmdLen, respBuf, (int)respSz);
+        if (!cmdBuf || !vbuf) {
+            ExFreePool(respBuf);
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        // Copy user command data into the vbuffer's command area.
+        // cmdBuf points to vbuf->buf; source is right before the header.
+        RtlCopyMemory(cmdBuf, (PUCHAR)pSubmit - cmdLen, cmdLen);
+
+        // Enqueue to virtqueue (acquires m_SpinLock internally, kicks).
+        g_pVglCtrlQueue->QueueBuffer(vbuf);
+
+        // Assign token for REAP to pick up.
+        ULONG token = InterlockedIncrement(&g_VglNextToken);
+        pSubmit->token = token;
+        pSubmit->flags = 0;
+        pSubmit->reserved = 0;
+
+        // Store outstanding vbuf for REAP polling.
+        KIRQL OldIrql;
+        KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+        g_pVglOutstandingVbuf = vbuf;
+        g_VglOutstandingToken = token;
+        KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+
+        Irp->IoStatus.Information = sizeof(vgl_tport_submit_t);
+        status = STATUS_SUCCESS;
+        break;
+    }
+
     case IOCTL_VGL_REAP:
+    {
+        vgl_tport_reap_t *pReap = (vgl_tport_reap_t *)Irp->AssociatedIrp.SystemBuffer;
+        ULONG inLen = ioStack->Parameters.DeviceIoControl.InputBufferLength;
+        ULONG outLen = ioStack->Parameters.DeviceIoControl.OutputBufferLength;
+
+        if (!g_pVglCtrlQueue) {
+            status = STATUS_NOT_READY;
+            break;
+        }
+        if (inLen < sizeof(vgl_tport_reap_t)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        ULONG token = pReap->token;
+        ULONG cap = pReap->out_len;
+
+        // Poll for the outstanding vbuf (max 1s: 1ms intervals x 1000).
+        PGPU_VBUFFER vbuf = NULL;
+        LARGE_INTEGER interval;
+        interval.QuadPart = -10000LL;  // 1ms in 100ns units
+
+        for (ULONG tries = 0; tries < 1000; tries++) {
+            KeDelayExecutionThread(KernelMode, FALSE, &interval);
+
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+            if (g_pVglOutstandingVbuf && g_VglOutstandingToken == token) {
+                vbuf = g_pVglOutstandingVbuf;
+                g_pVglOutstandingVbuf = NULL;
+                g_VglOutstandingToken = 0;
+                KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+                break;
+            }
+            KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+        }
+
+        if (vbuf) {
+            ULONG copyLen = min(vbuf->resp_size, cap);
+            PUCHAR outData = (PUCHAR)pReap + sizeof(vgl_tport_reap_t);
+
+            // DPC processes command then calls ReleaseBuffer (auto_release=TRUE).
+            // For dynamic responses (resp_size > MAX_INLINE_RESP_SIZE=24),
+            // ReleaseBuffer sets resp_buf=NULL. We must read before that.
+            BOOLEAN valid = FALSE;
+            if (copyLen >= 4) {
+                volatile ULONG type = *(volatile ULONG*)(vbuf->resp_buf);
+                valid = (type != 0);
+            }
+
+            if (valid) {
+                // Response is ready. Copy immediately.
+                RtlCopyMemory(outData, vbuf->resp_buf, copyLen);
+                pReap->has_data = 1;
+                pReap->status = 0;
+                pReap->out_len = copyLen;
+                Irp->IoStatus.Information = sizeof(vgl_tport_reap_t) + copyLen;
+            } else {
+                // DPC hasn't processed yet, or already released
+                // (resp_buf=NULL for dynamic responses).
+                pReap->has_data = 0;
+                pReap->status = 0;
+                Irp->IoStatus.Information = sizeof(vgl_tport_reap_t);
+            }
+            // NOTE: Do NOT call ReleaseBuffer — DPC does that (auto_release=TRUE).
+            // Double-free would occur if both DPC and REAP call ReleaseBuffer.
+            status = STATUS_SUCCESS;
+        } else {
+            pReap->has_data = 0;
+            pReap->status = 0;
+            Irp->IoStatus.Information = sizeof(vgl_tport_reap_t);
+            status = STATUS_SUCCESS;  // No data yet, not an error.
+        }
+        break;
+    }
+
     case IOCTL_VGL_WAIT:
+    {
+        vgl_tport_wait_t *pWait = (vgl_tport_wait_t *)Irp->AssociatedIrp.SystemBuffer;
+        ULONG inLen = ioStack->Parameters.DeviceIoControl.InputBufferLength;
+
+        if (inLen < sizeof(vgl_tport_wait_t)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        ULONG timeoutMs = pWait->timeout_ms;
+        LARGE_INTEGER interval;
+        interval.QuadPart = -(int64_t)timeoutMs * 10000LL;  // ms -> 100ns units
+
+        KeDelayExecutionThread(KernelMode, FALSE, &interval);
+
+        // Polling mode: IRQ not used (notify_cap=0).  signaled=0.
+        pWait->signaled = 0;
+
+        Irp->IoStatus.Information = sizeof(vgl_tport_wait_t);
+        status = STATUS_SUCCESS;
+        break;
+    }
+
     case IOCTL_VGL_PIN:
     case IOCTL_VGL_UNPIN:
-        // M1b (VirtIOLib + virtqueue) fills these in.
+        // M1b-p1 fills these (MmProbeAndLockPages + PFN table).
         status = STATUS_NOT_IMPLEMENTED;
         break;
 
@@ -176,6 +355,8 @@ VglDriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPa
     UNREFERENCED_PARAMETER(RegistryPath);
 
     DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL isolated driver object %p\n", DriverObject));
+
+    KeInitializeSpinLock(&g_VglTokenLock);
 
     for (int i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
     {
@@ -245,13 +426,14 @@ VglUpdateCaps(_In_ BOOLEAN MsixEnabled)
     InterlockedExchange(&g_VglMsixEnabled, MsixEnabled ? 1 : 0);
 }
 
-// Compatibility shim: previous M1a-v2 API name kept so viogpudo.cpp diff
-// stays minimal.  The device is created once at VglInit; this only updates
-// caps.
+// M1b-p0: receives theCtrlQueue* after HWInit.  Stores it for SUBMIT/REAP/WAIT.
 NTSTATUS
-VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled)
+VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled, _In_opt_ CtrlQueue *pCtrlQueue)
 {
     VglUpdateCaps(MsixEnabled);
+    if (pCtrlQueue) {
+        InterlockedExchangePointer(&g_pVglCtrlQueue, pCtrlQueue);
+    }
     return (g_VglDriverObject != NULL) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 

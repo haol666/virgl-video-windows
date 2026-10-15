@@ -175,7 +175,8 @@ NTSTATUS VioGpuDod::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
     // the WdfFunctions table is never bound; see vglctl.cpp header).
     // Failure is non-fatal: display keeps working without the bridge.
     {
-        NTSTATUS vglStatus = VglControlDeviceCreate(m_pHWDevice ? m_pHWDevice->IsMSIEnabled() : FALSE);
+        NTSTATUS vglStatus = VglControlDeviceCreate(m_pHWDevice ? m_pHWDevice->IsMSIEnabled() : FALSE,
+                                                     m_pHWDevice ? &m_pHWDevice->m_CtrlQueue : nullptr);
         if (!NT_SUCCESS(vglStatus))
         {
             DbgPrint(TRACE_LEVEL_WARNING, ("VGL control device create failed: 0x%X (display continues)\n", vglStatus));

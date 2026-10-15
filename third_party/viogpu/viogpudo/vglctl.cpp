@@ -217,22 +217,20 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         ULONG token = pReap->token;
         ULONG cap = pReap->out_len;
 
-        // Poll for the outstanding vbuf (max 1s: 1ms intervals x 1000).
+        // W11 0xCE FIX: no kernel-side polling loop.  The old 1000x1ms loop
+        // kept this IRP pending for up to 1s; killing the caller process tied
+        // IRP_MJ_CLOSE to the unfinished IOCTL, and any driver image unload
+        // in that window bugchecked 0xCE (observed 2026-10-15 18:1x).
+        // REAP now checks the outstanding slot once and returns immediately;
+        // user mode retries at its own pace.
         PGPU_VBUFFER vbuf = NULL;
-        LARGE_INTEGER interval;
-        interval.QuadPart = -10000LL;  // 1ms in 100ns units
-
-        for (ULONG tries = 0; tries < 1000; tries++) {
-            KeDelayExecutionThread(KernelMode, FALSE, &interval);
-
+        {
             KIRQL OldIrql;
             KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
             if (g_pVglOutstandingVbuf && g_VglOutstandingToken == token) {
                 vbuf = g_pVglOutstandingVbuf;
                 g_pVglOutstandingVbuf = NULL;
                 g_VglOutstandingToken = 0;
-                KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
-                break;
             }
             KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
         }
@@ -286,7 +284,13 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
             break;
         }
 
+        // W11 0xCE FIX: clamp kernel sleep to 50ms.  Sleeping the full
+        // caller-supplied timeout had the same pending-IRP window that
+        // bugchecked 0xCE via the old REAP loop.
         ULONG timeoutMs = pWait->timeout_ms;
+        if (timeoutMs > 50) {
+            timeoutMs = 50;
+        }
         LARGE_INTEGER interval;
         interval.QuadPart = -(LONGLONG)timeoutMs * 10000LL;  // ms -> 100ns units
 
@@ -438,10 +442,15 @@ VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled, _In_opt_ CtrlQueue *pCtrlQueue)
     return (g_VglDriverObject != NULL) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
-// Compatibility shim: no teardown on display Stop (device is static for the
-// image lifetime).  Registered as a no-op to keep VglCleanup symmetric.
+// W11 0xCE FIX: called from VioGpuDod::StopDevice / ~VioGpuDod.  NULLs the
+// cached CtrlQueue so SUBMIT/REAP return STATUS_INVALID_DEVICE_REQUEST
+// instead of touching the hardware objects that ~VioGpuDod deletes right
+// after this call (use-after-free guard).  The control device object itself
+// stays alive; with REAP returning immediately no IRP stays pending, so the
+// driver image unload path is clean.
 VOID
 VglControlDeviceDestroy(VOID)
 {
-    /* nothing - see VglCleanup */
+    InterlockedExchangePointer((volatile PVOID *)&g_pVglCtrlQueue, NULL);
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL control channel stopped (queue detached)\n"));
 }

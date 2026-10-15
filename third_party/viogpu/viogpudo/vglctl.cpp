@@ -39,6 +39,9 @@
 #include "driver.h"
 #include "viogpudo.h"
 
+#include <ntstatus.h>
+#include <stdint.h>
+
 #if !DBG
 #include "vglctl.tmh"
 #endif
@@ -67,7 +70,7 @@ CtrlQueue *g_pVglCtrlQueue = NULL;
 // M1b-p0: token table for SUBMIT→REAP round-trip.  Polling mode (no MSI-X),
 // so a single outstanding entry suffices for the smoke test.
 KSPIN_LOCK g_VglTokenLock;
-ULONG g_VglNextToken = 1;
+volatile LONG g_VglNextToken = 1;
 ULONG g_VglOutstandingToken = 0;
 PGPU_VBUFFER g_pVglOutstandingVbuf = NULL;   // vbuf ptr for the outstanding command
 
@@ -237,7 +240,7 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         }
 
         if (vbuf) {
-            ULONG copyLen = min(vbuf->resp_size, cap);
+            ULONG copyLen = (ULONG)min((UINT)vbuf->resp_size, cap);
             PUCHAR outData = (PUCHAR)pReap + sizeof(vgl_tport_reap_t);
 
             // DPC processes command then calls ReleaseBuffer (auto_release=TRUE).
@@ -432,7 +435,7 @@ VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled, _In_opt_ CtrlQueue *pCtrlQueue)
 {
     VglUpdateCaps(MsixEnabled);
     if (pCtrlQueue) {
-        InterlockedExchangePointer(&g_pVglCtrlQueue, pCtrlQueue);
+        InterlockedExchangePointer((volatile PVOID *)&g_pVglCtrlQueue, pCtrlQueue);
     }
     return (g_VglDriverObject != NULL) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }

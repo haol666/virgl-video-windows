@@ -117,6 +117,10 @@ class VioGpuAdapter : IVioGpuPCI
     {
         return &m_PciResources;
     }
+    CtrlQueue *GetCtrlQueue(void)
+    {
+        return &m_CtrlQueue;
+    }
     BOOLEAN ResetToVgaMode(void);
     BOOLEAN IsMSIEnabled()
     {

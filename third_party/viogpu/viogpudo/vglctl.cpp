@@ -90,10 +90,17 @@ VOID VglCompleteCB(_In_opt_ PVOID ctx)
 // (DISPATCH_LEVEL) = recursive spinlock acquisition on the same core ->
 // 0xCE.  The whole release sequence now runs at PASSIVE with NO lock held:
 // this helper takes the token lock ONLY to detach the slot pointers.
+//
+// M1b-p1 fix (KERNEL_SECURITY_CHECK_FAILURE): VglDropOutstanding MUST NOT
+// ReleaseBuffer(vbuf) / ExFreePool(resp) while DPC may still touch them.
+// Read g_VglDoneFlag under the lock FIRST: only when DPC has already fired
+// (doneFlag=1) is it safe to release vbuf/resp.  Otherwise just detach the
+// slot pointers and let DPC/REAP own the buffers.
 VOID VglDropOutstanding(VOID)
 {
     PGPU_VBUFFER vbuf = NULL;
     PVOID resp = NULL;
+    BOOLEAN done = FALSE;
     CtrlQueue *pQ = g_pVglCtrlQueue;
 
     {
@@ -101,6 +108,7 @@ VOID VglDropOutstanding(VOID)
         KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
         vbuf = g_pVglOutstandingVbuf;
         resp = g_pVglOutstandingResp;
+        done = (g_VglDoneFlag != 0);
         g_pVglOutstandingVbuf = NULL;
         g_pVglOutstandingResp = NULL;
         g_VglOutstandingToken = 0;
@@ -108,13 +116,21 @@ VOID VglDropOutstanding(VOID)
         KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
     }
 
-    // Pass the lock before touching the pool (FreeBuf locks m_SpinLock).
-    if (vbuf && pQ) {
-        pQ->ReleaseBuffer(vbuf);
+    if (done) {
+        // DPC already fired complete_cb; vbuf/resp are no longer needed.
+        // Safe to release here (PASSIVE_LEVEL, no lock held).
+        if (vbuf && pQ) {
+            pQ->ReleaseBuffer(vbuf);
+        }
+        if (resp) {
+            ExFreePool(resp);
+        }
     }
-    if (resp) {
-        ExFreePool(resp);
-    }
+    // If done=FALSE: DPC hasn't run yet.  vbuf still in m_InUseBufs with
+    // our ExAlloc respBuf.  Do NOT release here — DPC needs them.
+    // REAP will harvest and release when it sees doneFlag transition.
+    // Worst case: vbuf leaks until driver unload (VglControlDeviceDestroy
+    // calls ReleaseBuffer on the stale slot).  No BSOD, no UAF.
 }
 
 const WCHAR g_VglNtDeviceName[] = L"\\Device\\VGLVIDEO0";

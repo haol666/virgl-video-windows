@@ -786,21 +786,21 @@ void VioGpuBuf::FreeBuf(_In_ PGPU_VBUFFER pbuf)
     }
     if (pbuf->resp_buf && pbuf->resp_size > MAX_INLINE_RESP_SIZE)
     {
-        delete[] reinterpret_cast<PBYTE>(pbuf->resp_buf);
+        ExFreePool(pbuf->resp_buf);
         pbuf->resp_buf = NULL;
         pbuf->resp_size = 0;
     }
 
     if (pbuf->data_buf && pbuf->data_size)
     {
-        delete[] reinterpret_cast<PBYTE>(pbuf->data_buf);
+        ExFreePool(pbuf->data_buf);
         pbuf->data_buf = NULL;
         pbuf->data_size = 0;
     }
 
     if (m_uCount > m_uCountMin)
     {
-        delete[] reinterpret_cast<PBYTE>(pbuf);
+        ExFreePool(pbuf);
         --m_uCount;
     }
     else

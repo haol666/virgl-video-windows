@@ -14,6 +14,7 @@
  */
 
 #include "vgl/vgl.h"
+#include "vgl/vgl_transport.h"
 #include "../src/vgl_internal.h"
 
 #include <stdio.h>

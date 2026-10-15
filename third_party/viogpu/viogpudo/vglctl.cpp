@@ -133,9 +133,14 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
     case IOCTL_VGL_SUBMIT:
     {
         // Input buffer: [command_data (len bytes)][vgl_tport_submit_t]
-        // vgl_tport_submit_t is at the tail; command_data precedes it.
-        vgl_tport_submit_t *pSubmit = (vgl_tport_submit_t *)Irp->AssociatedIrp.SystemBuffer;
+        // vgl_tport_submit_t is at the TAIL; command_data precedes it.
+        // p0.2 fix: pSubmit must be computed from inLen (tail), not the
+        // buffer start - the start holds the command's first dword
+        // (ctrl_hdr.type), so the old placement misread len and read the
+        // command copy source out of bounds (pSubmit - cmdLen < SystemBuffer).
         ULONG inLen = ioStack->Parameters.DeviceIoControl.InputBufferLength;
+        vgl_tport_submit_t *pSubmit = (vgl_tport_submit_t *)
+            ((PUCHAR)Irp->AssociatedIrp.SystemBuffer + inLen - sizeof(vgl_tport_submit_t));
 
         if (!g_pVglCtrlQueue) {
             status = STATUS_INVALID_DEVICE_REQUEST;

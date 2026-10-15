@@ -77,16 +77,13 @@ jobs:
         $buildDir = "third_party\viogpu\build"
         # Generate self-signed cert for test signing
         $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=viogpudo-test" -KeyUsage DigitalSignature -FriendlyName "viogpudo test" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable
-        $pfxPath = "$env:TEMP\viogpudo-test.pfx"
-        $pwd = ConvertTo-SecureString -String "test" -Force -AsPlainText
-        Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pwd | Out-Null
         # Run inf2cat to generate catalog
         & $inf2cat /driver:"$buildDir" /os:10_X64
         if ($LASTEXITCODE -ne 0) { throw "inf2cat failed"
         }
-        # Sign the catalog
+        # Sign the catalog using cert from store (no PFX needed)
         if ($signtool) {
-          & $signtool sign /f $pfxPath /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "$buildDir\viogpudo.cat"
+          & $signtool sign /s My /n "viogpudo-test" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "$buildDir\viogpudo.cat"
           if ($LASTEXITCODE -ne 0) { throw "signtool sign failed"
           }
         }

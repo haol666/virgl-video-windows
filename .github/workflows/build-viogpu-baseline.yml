@@ -76,7 +76,7 @@ jobs:
         }
         $buildDir = "third_party\viogpu\build"
         # Generate self-signed cert for test signing
-        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=viogpudo-test" -KeyUsage DigitalSignature -FriendlyName "viogpudo test" -CertStoreLocation "Cert:\CurrentUser\My"
+        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=viogpudo-test" -KeyUsage DigitalSignature -FriendlyName "viogpudo test" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable
         $pfxPath = "$env:TEMP\viogpudo-test.pfx"
         $pwd = ConvertTo-SecureString -String "test" -Force -AsPlainText
         Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $pwd | Out-Null

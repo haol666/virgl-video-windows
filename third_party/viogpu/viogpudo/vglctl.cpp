@@ -247,16 +247,16 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         // Enqueue to virtqueue (acquires m_SpinLock internally, kicks).
         g_pVglCtrlQueue->QueueBuffer(vbuf);
 
-        // R1 DEBUG: 确认 SUBMIT 路径是否正常入队
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("VGL SUBMIT: token=%lu cmdLen=%lu vbuf=%p queue_kick\n",
-                  token, cmdLen, vbuf));
-
         // Assign token for REAP to pick up.
         ULONG token = InterlockedIncrement(&g_VglNextToken);
         pSubmit->token = token;
         pSubmit->flags = 0;
         pSubmit->reserved = 0;
+
+        // R1 DEBUG: 确认 SUBMIT 路径是否正常入队
+        DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("VGL SUBMIT: token=%lu cmdLen=%lu vbuf=%p queue_kick\n",
+                  token, cmdLen, vbuf));
 
         // Store outstanding vbuf for REAP polling.
         {

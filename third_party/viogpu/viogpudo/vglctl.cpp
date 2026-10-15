@@ -200,6 +200,12 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         g_VglOutstandingToken = token;
         KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
 
+        // p0.2 fix #2: METHOD_BUFFERED copies back the FIRST Information
+        // bytes of SystemBuffer, but pSubmit (holding the token) sits at the
+        // buffer TAIL.  Copy the filled header to the front so userspace
+        // (libvgl reads out[0..16]) actually gets the token - previously the
+        // command header was copied back and the token never reached user mode.
+        RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, pSubmit, sizeof(*pSubmit));
         Irp->IoStatus.Information = sizeof(vgl_tport_submit_t);
         status = STATUS_SUCCESS;
         break;

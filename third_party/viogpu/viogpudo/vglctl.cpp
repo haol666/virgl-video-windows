@@ -82,19 +82,36 @@ VOID VglCompleteCB(_In_opt_ PVOID ctx)
     InterlockedExchange(&g_VglDoneFlag, 1);
 }
 
-// 释放 outstanding（含队列内 vbuf 与响应缓冲）。须在 queue 仍有效时调用。
-VOID VglDropOutstandingLocked(VOID)
+// p0.4 fix (0xCE BSOD): ReleaseBuffer->FreeBuf internally acquires the
+// pool's m_SpinLock.  Calling it while holding g_VglTokenLock
+// (DISPATCH_LEVEL) = recursive spinlock acquisition on the same core ->
+// 0xCE.  The whole release sequence now runs at PASSIVE with NO lock held:
+// this helper takes the token lock ONLY to detach the slot pointers.
+VOID VglDropOutstanding(VOID)
 {
-    if (g_pVglOutstandingVbuf) {
-        g_pVglCtrlQueue->ReleaseBuffer(g_pVglOutstandingVbuf);
+    PGPU_VBUFFER vbuf = NULL;
+    PVOID resp = NULL;
+    CtrlQueue *pQ = g_pVglCtrlQueue;
+
+    {
+        KIRQL OldIrql;
+        KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+        vbuf = g_pVglOutstandingVbuf;
+        resp = g_pVglOutstandingResp;
         g_pVglOutstandingVbuf = NULL;
-    }
-    if (g_pVglOutstandingResp) {
-        ExFreePool(g_pVglOutstandingResp);
         g_pVglOutstandingResp = NULL;
+        g_VglOutstandingToken = 0;
+        g_VglDoneFlag = 0;
+        KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
     }
-    g_VglOutstandingToken = 0;
-    g_VglDoneFlag = 0;
+
+    // Pass the lock before touching the pool (FreeBuf locks m_SpinLock).
+    if (vbuf && pQ) {
+        pQ->ReleaseBuffer(vbuf);
+    }
+    if (resp) {
+        ExFreePool(resp);
+    }
 }
 
 const WCHAR g_VglNtDeviceName[] = L"\\Device\\VGLVIDEO0";
@@ -220,12 +237,9 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         vbuf->complete_ctx = NULL;
 
         // 丢弃未收割的旧 outstanding（单深模型，新命令覆盖旧的）
-        {
-            KIRQL OldIrql;
-            KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
-            VglDropOutstandingLocked();
-            KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
-        }
+        // p0.4: MUST run WITHOUT the token lock held (FreeBuf takes the
+        // pool spinlock - nested acquisition was the 0xCE BSOD).
+        VglDropOutstanding();
 
         // Enqueue to virtqueue (acquires m_SpinLock internally, kicks).
         g_pVglCtrlQueue->QueueBuffer(vbuf);
@@ -510,21 +524,30 @@ VglControlDeviceDestroy(VOID)
     // queue pointer), then clean any outstanding slot using the local queue
     // pointer BEFORE the hardware objects die (~VioGpuDod deletes the
     // CtrlQueue right after this call).
+    // p0.4 fix: detach the slot INSIDE the lock but release the pool buffer
+    // OUTSIDE it (FreeBuf takes the pool spinlock; nested acquisition at
+    // DISPATCH_LEVEL was another instance of the 0xCE bug).
     CtrlQueue *pQueue = (CtrlQueue *)InterlockedExchangePointer((volatile PVOID *)&g_pVglCtrlQueue, NULL);
     if (pQueue) {
-        KIRQL OldIrql;
-        KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
-        if (g_pVglOutstandingVbuf) {
-            pQueue->ReleaseBuffer(g_pVglOutstandingVbuf);
+        PGPU_VBUFFER staleVbuf = NULL;
+        PVOID staleResp = NULL;
+        {
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+            staleVbuf = g_pVglOutstandingVbuf;
+            staleResp = g_pVglOutstandingResp;
             g_pVglOutstandingVbuf = NULL;
-        }
-        if (g_pVglOutstandingResp) {
-            ExFreePool(g_pVglOutstandingResp);
             g_pVglOutstandingResp = NULL;
+            g_VglOutstandingToken = 0;
+            g_VglDoneFlag = 0;
+            KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
         }
-        g_VglOutstandingToken = 0;
-        g_VglDoneFlag = 0;
-        KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+        if (staleVbuf) {
+            pQueue->ReleaseBuffer(staleVbuf);
+        }
+        if (staleResp) {
+            ExFreePool(staleResp);
+        }
     }
     DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL control channel stopped (queue detached)\n"));
 }

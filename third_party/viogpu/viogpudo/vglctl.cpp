@@ -40,7 +40,6 @@
 #include "viogpudo.h"
 
 #include <ntstatus.h>
-#include <stdint.h>
 
 #if !DBG
 #include "vglctl.tmh"
@@ -139,7 +138,7 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         ULONG inLen = ioStack->Parameters.DeviceIoControl.InputBufferLength;
 
         if (!g_pVglCtrlQueue) {
-            status = STATUS_NOT_READY;
+            status = STATUS_INVALID_DEVICE_REQUEST;
             break;
         }
         if (inLen < sizeof(vgl_tport_submit_t)) {
@@ -208,7 +207,7 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         ULONG outLen = ioStack->Parameters.DeviceIoControl.OutputBufferLength;
 
         if (!g_pVglCtrlQueue) {
-            status = STATUS_NOT_READY;
+            status = STATUS_INVALID_DEVICE_REQUEST;
             break;
         }
         if (inLen < sizeof(vgl_tport_reap_t)) {
@@ -290,7 +289,7 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
 
         ULONG timeoutMs = pWait->timeout_ms;
         LARGE_INTEGER interval;
-        interval.QuadPart = -(int64_t)timeoutMs * 10000LL;  // ms -> 100ns units
+        interval.QuadPart = -(LONGLONG)timeoutMs * 10000LL;  // ms -> 100ns units
 
         KeDelayExecutionThread(KernelMode, FALSE, &interval);
 

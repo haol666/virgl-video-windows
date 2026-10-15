@@ -72,6 +72,30 @@ KSPIN_LOCK g_VglTokenLock;
 volatile LONG g_VglNextToken = 1;
 ULONG g_VglOutstandingToken = 0;
 PGPU_VBUFFER g_pVglOutstandingVbuf = NULL;   // vbuf ptr for the outstanding command
+PVOID g_pVglOutstandingResp = NULL;          // our 512B resp target (ExAlloc)
+volatile LONG g_VglDoneFlag = 0;             // set by DPC complete_cb
+
+// DPC 回调：仅置位完成标志（DISPATCH_LEVEL 安全，勿做其它事）
+VOID VglCompleteCB(_In_opt_ PVOID ctx)
+{
+    UNREFERENCED_PARAMETER(ctx);
+    InterlockedExchange(&g_VglDoneFlag, 1);
+}
+
+// 释放 outstanding（含队列内 vbuf 与响应缓冲）。须在 queue 仍有效时调用。
+VOID VglDropOutstandingLocked(VOID)
+{
+    if (g_pVglOutstandingVbuf) {
+        g_pVglCtrlQueue->ReleaseBuffer(g_pVglOutstandingVbuf);
+        g_pVglOutstandingVbuf = NULL;
+    }
+    if (g_pVglOutstandingResp) {
+        ExFreePool(g_pVglOutstandingResp);
+        g_pVglOutstandingResp = NULL;
+    }
+    g_VglOutstandingToken = 0;
+    g_VglDoneFlag = 0;
+}
 
 const WCHAR g_VglNtDeviceName[] = L"\\Device\\VGLVIDEO0";
 const WCHAR g_VglDosDeviceName[] = L"\\DosDevices\\VGLVIDEO0";
@@ -169,9 +193,9 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
             break;
         }
 
-        // AllocCmdResp: gets a vbuffer from the pool with cmd area + resp area.
-        // auto_release=TRUE (set by GetBuf), so DPC will call ReleaseBuffer.
-        // REAP must NOT call ReleaseBuffer — would double-free.
+        // AllocCmdResp: takes a vbuffer from the pool; resp target is OUR
+        // 512B buffer (GetBuf external resp_buf) so DMA lands in memory we
+        // own and control for the whole outstanding lifetime.
         PGPU_VBUFFER vbuf;
         PVOID cmdBuf = g_pVglCtrlQueue->AllocCmdResp(&vbuf, (int)cmdLen, respBuf, (int)respSz);
         if (!cmdBuf || !vbuf) {
@@ -184,6 +208,25 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         // cmdBuf points to vbuf->buf; source is right before the header.
         RtlCopyMemory(cmdBuf, (PUCHAR)pSubmit - cmdLen, cmdLen);
 
+        // p0.2 fix #3 (data plane v3, AskDisplayInfo pattern):
+        //   auto_release=FALSE + complete_cb=VglCompleteCB → DPC 只置完成
+        // 标志不释放 vbuf；REAP 读响应后自己 Release。彻底消灭：
+        //   (a) REAP 解引用 resp_buf 空指针/悬垂（今晚蓝屏根因）；
+        //   (b) 动态响应 >24B 在 DPC 释放后丢失（W11 竞态）。
+        // 响应落在我们自己的 512B ExAlloc 缓冲（GetBuf 外部 resp_buf），
+        // 生命周期完全归我们管。
+        vbuf->auto_release = false;
+        vbuf->complete_cb = VglCompleteCB;
+        vbuf->complete_ctx = NULL;
+
+        // 丢弃未收割的旧 outstanding（单深模型，新命令覆盖旧的）
+        {
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+            VglDropOutstandingLocked();
+            KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+        }
+
         // Enqueue to virtqueue (acquires m_SpinLock internally, kicks).
         g_pVglCtrlQueue->QueueBuffer(vbuf);
 
@@ -194,11 +237,14 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         pSubmit->reserved = 0;
 
         // Store outstanding vbuf for REAP polling.
-        KIRQL OldIrql;
-        KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
-        g_pVglOutstandingVbuf = vbuf;
-        g_VglOutstandingToken = token;
-        KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+        {
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+            g_pVglOutstandingVbuf = vbuf;
+            g_pVglOutstandingResp = respBuf;
+            g_VglOutstandingToken = token;
+            KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+        }
 
         // p0.2 fix #2: METHOD_BUFFERED copies back the FIRST Information
         // bytes of SystemBuffer, but pSubmit (holding the token) sits at the
@@ -234,47 +280,45 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         // in that window bugchecked 0xCE (observed 2026-10-15 18:1x).
         // REAP now checks the outstanding slot once and returns immediately;
         // user mode retries at its own pace.
+        // p0.2 fix #3: REAP now waits on the DPC completion flag and owns
+        // the vbuf lifetime end-to-end (auto_release=FALSE + complete_cb per
+        // driver's own AskDisplayInfo pattern).  Only a DONE outstanding with
+        // a matching token is harvested; anything else returns has_data=0 and
+        // stays in the slot for the next retry.  All data comes from OUR
+        // 512B resp buffer (never NULL) - the old code dereferenced
+        // vbuf->resp_buf after DPC ReleaseBuffer (NULL/dangling = BSOD).
         PGPU_VBUFFER vbuf = NULL;
+        PVOID respBuf = NULL;
         {
             KIRQL OldIrql;
             KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
-            if (g_pVglOutstandingVbuf && g_VglOutstandingToken == token) {
+            if (g_pVglOutstandingVbuf &&
+                g_VglOutstandingToken == token &&
+                g_VglDoneFlag) {
                 vbuf = g_pVglOutstandingVbuf;
+                respBuf = g_pVglOutstandingResp;
                 g_pVglOutstandingVbuf = NULL;
+                g_pVglOutstandingResp = NULL;
                 g_VglOutstandingToken = 0;
+                g_VglDoneFlag = 0;
             }
             KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
         }
 
         if (vbuf) {
-            ULONG copyLen = (ULONG)min((UINT)vbuf->resp_size, cap);
+            // done: DPC ran complete_cb; response DMA'd into OUR buffer.
+            // Copy out, then release vbuf (ours now) and free the buffer.
+            ULONG copyLen = (ULONG)min((UINT)512, cap);
             PUCHAR outData = (PUCHAR)pReap + sizeof(vgl_tport_reap_t);
 
-            // DPC processes command then calls ReleaseBuffer (auto_release=TRUE).
-            // For dynamic responses (resp_size > MAX_INLINE_RESP_SIZE=24),
-            // ReleaseBuffer sets resp_buf=NULL. We must read before that.
-            BOOLEAN valid = FALSE;
-            if (copyLen >= 4) {
-                volatile ULONG type = *(volatile ULONG*)(vbuf->resp_buf);
-                valid = (type != 0);
-            }
+            RtlCopyMemory(outData, respBuf, copyLen);
+            pReap->has_data = 1;
+            pReap->status = 0;
+            pReap->out_len = copyLen;
+            Irp->IoStatus.Information = sizeof(vgl_tport_reap_t) + copyLen;
 
-            if (valid) {
-                // Response is ready. Copy immediately.
-                RtlCopyMemory(outData, vbuf->resp_buf, copyLen);
-                pReap->has_data = 1;
-                pReap->status = 0;
-                pReap->out_len = copyLen;
-                Irp->IoStatus.Information = sizeof(vgl_tport_reap_t) + copyLen;
-            } else {
-                // DPC hasn't processed yet, or already released
-                // (resp_buf=NULL for dynamic responses).
-                pReap->has_data = 0;
-                pReap->status = 0;
-                Irp->IoStatus.Information = sizeof(vgl_tport_reap_t);
-            }
-            // NOTE: Do NOT call ReleaseBuffer — DPC does that (auto_release=TRUE).
-            // Double-free would occur if both DPC and REAP call ReleaseBuffer.
+            g_pVglCtrlQueue->ReleaseBuffer(vbuf);
+            ExFreePool(respBuf);
             status = STATUS_SUCCESS;
         } else {
             pReap->has_data = 0;
@@ -462,6 +506,25 @@ VglControlDeviceCreate(_In_ BOOLEAN MsixEnabled, _In_opt_ CtrlQueue *pCtrlQueue)
 VOID
 VglControlDeviceDestroy(VOID)
 {
-    InterlockedExchangePointer((volatile PVOID *)&g_pVglCtrlQueue, NULL);
+    // p0.2 fix #3: detach order matters.  First stop new IO (swap out the
+    // queue pointer), then clean any outstanding slot using the local queue
+    // pointer BEFORE the hardware objects die (~VioGpuDod deletes the
+    // CtrlQueue right after this call).
+    CtrlQueue *pQueue = (CtrlQueue *)InterlockedExchangePointer((volatile PVOID *)&g_pVglCtrlQueue, NULL);
+    if (pQueue) {
+        KIRQL OldIrql;
+        KeAcquireSpinLock(&g_VglTokenLock, &OldIrql);
+        if (g_pVglOutstandingVbuf) {
+            pQueue->ReleaseBuffer(g_pVglOutstandingVbuf);
+            g_pVglOutstandingVbuf = NULL;
+        }
+        if (g_pVglOutstandingResp) {
+            ExFreePool(g_pVglOutstandingResp);
+            g_pVglOutstandingResp = NULL;
+        }
+        g_VglOutstandingToken = 0;
+        g_VglDoneFlag = 0;
+        KeReleaseSpinLock(&g_VglTokenLock, OldIrql);
+    }
     DbgPrint(TRACE_LEVEL_INFORMATION, ("VGL control channel stopped (queue detached)\n"));
 }

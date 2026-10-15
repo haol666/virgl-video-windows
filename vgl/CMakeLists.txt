@@ -30,4 +30,9 @@ if(MSVC)
     target_compile_options(test_wire PRIVATE /W4)
 endif()
 
+# L1 transport probe - run on the VM with the M1b driver loaded.
+add_executable(probe_win tests/probe_win.c)
+target_link_libraries(probe_win PRIVATE vgl)
+target_compile_definitions(probe_win PRIVATE _CRT_SECURE_NO_WARNINGS)
+
 add_test(NAME wire COMMAND test_wire)

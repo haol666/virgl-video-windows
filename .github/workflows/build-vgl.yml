@@ -28,3 +28,13 @@ jobs:
         run: |
           Get-ChildItem -Recurse build -Filter *.lib | Select-Object FullName
           Get-ChildItem -Recurse build -Filter test_wire.exe | Select-Object FullName
+          Get-ChildItem -Recurse build -Filter probe_win.exe | Select-Object FullName
+
+      - name: Upload L1 artifacts (libvgl + probe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvgl-x64
+          path: |
+            build/**/Release/vgl.lib
+            build/**/Release/probe_win.exe
+          if-no-files-found: error

@@ -41,6 +41,28 @@ int main(void)
     printf("=== vgl L1 transport probe ===\n");
 
     /* ---- [1] transport open + GET_INFO ---- */
+    {
+        /* raw pre-check with full diagnostics: isolate lib vs device */
+        HANDLE h = CreateFileW(VGL_TRANSPORT_DEVICE,
+                               GENERIC_READ | GENERIC_WRITE,
+                               0, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            printf("[FAIL] raw CreateFile err=%lu\n", GetLastError());
+            return 1;
+        }
+        DWORD raw[8] = {0}, br = 0;
+        BOOL ok = DeviceIoControl(h, IOCTL_VGL_GET_INFO, NULL, 0,
+                                  raw, sizeof(raw), &br, NULL);
+        printf("[1a] raw GET_INFO: ok=%d err=%lu br=%lu magic=0x%08x ioctl=0x%08lx sizeof(info)=%lu\n",
+               ok, ok ? 0 : GetLastError(), br, raw[0],
+               (unsigned long)IOCTL_VGL_GET_INFO,
+               (unsigned long)sizeof(vgl_tport_info_t));
+        CloseHandle(h);
+        if (!ok || br == 0 || raw[0] != VGL_MAGIC) {
+            printf("[FAIL] raw GET_INFO did not return VGV1\n");
+            return 1;
+        }
+    }
     if (vgl_tport_open() != 0) {
         printf("[FAIL] vgl_tport_open - driver absent? (\\\\.\\VGLVIDEO0)\n");
         return 1;

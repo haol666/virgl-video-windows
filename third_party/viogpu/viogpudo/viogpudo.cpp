@@ -3833,11 +3833,12 @@ void VioGpuAdapter::ConfigChanged(void)
 
 VOID VioGpuAdapter::DpcRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
     UNREFERENCED_PARAMETER(pDxgkInterface);
     PGPU_VBUFFER pvbuf = NULL;
     UINT len = 0;
     ULONG reason;
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("---> %s pending=0x%lx\n", __FUNCTION__, m_PendingWorks));
     while ((reason = InterlockedExchange((PLONG)&m_PendingWorks, 0)) != 0)
     {
         if ((reason & ISR_REASON_DISPLAY))
@@ -3849,10 +3850,10 @@ VOID VioGpuAdapter::DpcRoutine(_In_ PDXGKRNL_INTERFACE pDxgkInterface)
                 PGPU_CTRL_HDR resp = (PGPU_CTRL_HDR)pvbuf->resp_buf;
 
                 // R2 DEBUG: 确认 resp_buf 是否正确映射（应为我们 512B ExAlloc 缓冲）
-                DbgPrint(TRACE_LEVEL_INFORMATION,
-                         ("VGL DPC: pvbuf=%p resp_buf=%p auto_release=%d complete_cb=%p type=%lu\n",
-                          pvbuf, resp, pvbuf->auto_release, pvbuf->complete_cb,
-                          resp ? resp->type : 0xFFFFFFFF));
+DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("VGL DPC: pvbuf=%p resp_buf=%p auto_release=%d complete_cb=%p type=%lu reason=0x%lx\n",
+                  pvbuf, resp, pvbuf ? pvbuf->auto_release : -1, pvbuf ? pvbuf->complete_cb : NULL,
+                  resp ? resp->type : 0xFFFFFFFF, reason));
 
                 if (resp->type >= VIRTIO_GPU_RESP_ERR_UNSPEC)
                 {

@@ -33,8 +33,6 @@
 #include "viogpu_queue.tmh"
 #endif
 
-volatile LONG g_VglDisableKick = 0;
-
 static BOOLEAN BuildSGElement(VirtIOBufferDescriptor *sg, PVOID buf, ULONG size)
 {
     if (size != 0 && MmIsAddressValid(buf))
@@ -565,9 +563,7 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
 
     Lock(&SavedIrql);
     ret = AddBuf(&sg[0], outcnt, incnt, buf, NULL, 0);
-    if (!g_VglDisableKick) {
-        Kick();
-    }
+    Kick();
     Unlock(SavedIrql);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s ret = %d\n", __FUNCTION__, ret));

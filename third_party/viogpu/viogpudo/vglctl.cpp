@@ -38,6 +38,7 @@
 
 #include "driver.h"
 #include "viogpudo.h"
+#include "viogpu_queue.h"
 
 #include <ntstatus.h>
 
@@ -261,7 +262,12 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         VglDropOutstanding();
 
         // Enqueue to virtqueue (acquires m_SpinLock internally, kicks).
+        // M1b-p1 debug: skip virtqueue_kick to isolate DPC-path hangs.
+        // When g_VglDisableKick=1, buffer is added to queue but ISR/DPC
+        // never fires. Used for smoke testing without triggering DPC.
+        g_VglDisableKick = 1;
         g_pVglCtrlQueue->QueueBuffer(vbuf);
+        g_VglDisableKick = 0;
 
         // Assign token for REAP to pick up.
         ULONG token = InterlockedIncrement(&g_VglNextToken);
@@ -271,7 +277,7 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
 
         // R1 DEBUG: 确认 SUBMIT 路径是否正常入队
         DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("VGL SUBMIT: token=%lu cmdLen=%lu vbuf=%p queue_kick\n",
+                 ("VGL SUBMIT: token=%lu cmdLen=%lu vbuf=%p queue_kick_disabled\n",
                   token, cmdLen, vbuf));
 
         // Store outstanding vbuf for REAP polling.

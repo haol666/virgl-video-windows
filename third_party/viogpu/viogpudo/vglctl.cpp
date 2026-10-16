@@ -120,11 +120,11 @@ VOID VglDropOutstanding(VOID)
     if (done) {
         // DPC already fired complete_cb; vbuf/resp are no longer needed.
         // Safe to release here (PASSIVE_LEVEL, no lock held).
+        // ReleaseBuffer(vbuf) → FreeBuf(vbuf) already frees resp_buf
+        // (resp_size > MAX_INLINE_RESP_SIZE → external ExAlloc buffer).
+        // NO separate ExFreePool(resp) — that would be a double-free.
         if (vbuf && pQ) {
             pQ->ReleaseBuffer(vbuf);
-        }
-        if (resp) {
-            ExFreePool(resp);
         }
     }
     // If done=FALSE: DPC hasn't run yet.  vbuf still in m_InUseBufs with
@@ -351,7 +351,10 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
                      ("VGL REAP: token=%lu MATCHED, has_data=1, resp=%p\n",
                       token, respBuf));
             // done: DPC ran complete_cb; response DMA'd into OUR buffer.
-            // Copy out, then release vbuf (ours now) and free the buffer.
+            // Copy out, then release vbuf (ours now).
+            // FreeBuf() inside ReleaseBuffer() already frees resp_buf
+            // (resp_size=512 > MAX_INLINE_RESP_SIZE=24 → external buffer).
+            // NO separate ExFreePool(respBuf) — that would be a double-free.
             ULONG copyLen = (ULONG)min((UINT)512, cap);
             PUCHAR outData = (PUCHAR)pReap + sizeof(vgl_tport_reap_t);
 
@@ -362,7 +365,6 @@ VglDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
             Irp->IoStatus.Information = sizeof(vgl_tport_reap_t) + copyLen;
 
             g_pVglCtrlQueue->ReleaseBuffer(vbuf);
-            ExFreePool(respBuf);
             status = STATUS_SUCCESS;
         } else {
             // R1 DEBUG: DPC 未触发或 token 不匹配
